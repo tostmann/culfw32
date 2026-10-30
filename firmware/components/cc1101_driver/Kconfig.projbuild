@@ -1,0 +1,48 @@
+menu "CULFW32: CC1101 Driver (Slot 0)"
+
+    config CULFW32_CC1101_SPI_HOST
+        int "SPI host (ESP32-C6: nur 1 = SPI2/FSPI)"
+        range 1 1
+        default 1
+
+    # Pin-Defaults = CUL32-Serienhardware (CUL60.sch, ESP32-C6-MINI-1-H4 + CC1101RTKR).
+    # SPI laeuft ueber RN3 (4x 33R Serienwiderstaende), GDOs ueber RN2:
+    #   RN3: IO21<->MOSI, IO19<->SCK, IO20<->MISO, IO18<->SS(CC1101 CS)
+    #   RN2: IO2<->GDO0, IO3<->GDO2   (IO4/IO5 liegen auf den unbeschalteten
+    #        Reservenetzen GDO3/CC_RST — nicht verwenden)
+    # GPIO18..21 sind auf dem C6 SDIO/FSPICS2..5, also KEINE IOMUX-Datenpins fuer
+    # SPI2 -> das Routing laeuft ueber die GPIO-Matrix. Bei <= 10 MHz unkritisch.
+    # IO19/20/21 liegen zusaetzlich am FFC J1 (Erweiterungsmodul teilt den Bus) —
+    # deshalb ist die SPI-Mutex-Serialisierung Pflicht.
+
+    config CULFW32_CC1101_PIN_MOSI
+        int "Pin MOSI"
+        default 21
+
+    config CULFW32_CC1101_PIN_MISO
+        int "Pin MISO"
+        default 20
+
+    config CULFW32_CC1101_PIN_SCK
+        int "Pin SCK"
+        default 19
+
+    config CULFW32_CC1101_PIN_CS
+        int "Pin CS / SS"
+        default 18
+
+    config CULFW32_CC1101_PIN_GDO0
+        int "Pin GDO0 (primary IRQ)"
+        default 2
+
+    config CULFW32_CC1101_PIN_GDO2
+        int "Pin GDO2 (secondary IRQ)"
+        default 3
+
+    config CULFW32_CC1101_SPI_CLOCK_HZ
+        int "SPI clock (Hz)"
+        # Datenblatt SWRS061I quotiert ueblicherweise 6.5 MHz max bei aktivem Chip;
+        # konservativ mit 1 MHz starten, hochziehen wenn stabil.
+        default 1000000
+
+endmenu

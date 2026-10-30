@@ -1,0 +1,102 @@
+# ESP-IDF build artifacts (~232 MB)
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local backup/scratch
+*.bak
+*.orig
+
+# Vendored FHEM-Distribution fuer HMUARTLGW-Tests — throwaway, upstream verfuegbar.
+# Nur unsere eigenen Traces sollen committed sein; die FHEM-Referenz liegt upstream
+# (https://svn.fhem.de/trac/browser/trunk/fhem/FHEM/00_HMUARTLGW.pm).
+test/hmuartlgw/fhem-data/
+test/hmuartlgw/HMUARTLGW.pm
+
+# Werkzeug-Arbeitsverzeichnisse
+.claude/
+
+# Homegear-Test-Container Daten
+test/homegear/
+
+# Lokale Trace-/Capture-Dumps (HF-Sniffer, USB-mon, DSLogic)
+*.sr
+*.pcap
+*.pcapng
+firmware/test/hmuartlgw/*.strace.log
+
+# Lokale Arbeitsnotizen, Secrets, Logs, fremde Datenblaetter und Schaltplaene
+# gehoeren nicht ins Repository.
+CLAUDE.md
+MEMORY.md
+GEMINI.md
+FACTS.md
+HARDWARE_STATUS.md
+.env
+.env.*
+*.key
+*.pem
+*.log
+schematics/
+datasheets/
+datasheet/
+
+
+# Lokale Mess-/Session-Artefakte (bleiben lokal, siehe Footprint-Regel)
+test/rmt_idle_2026-08-29/
+test/pa_2026-09-03/
+test/pa_2026-09-07/
+test/protomatrix_2026-10-08/
+
+# Produktfotos, lokal abgelegt — nicht Teil der Firmware-Quellen
+/pics/
+
+# Freigegebene Auslieferungsartefakte: archiviert, aber NICHT versioniert.
+# ESP-IDF-Builds sind ohne SOURCE_DATE_EPOCH nicht bit-reproduzierbar, deshalb
+# muessen freigegebene Binaries aufbewahrt werden — Uebersetzungsergebnisse
+# gehoeren aber nicht in die Versionsverwaltung (siehe docs/URHEBERSCHAFT.md §8).
+# Das MANIFEST je Release ist die Ausnahme: es traegt Commit, md5 und Freigabe.
+releases/**
+!releases/**/
+!releases/**/MANIFEST.md
+
+# Session-Artefakte
+*.pid
+
+# Uebersetzungsergebnisse gehoeren nicht in die Versionsverwaltung — auch
+# Host-Testbinaries unter components/*/test/ nicht.
+firmware/components/*/test/test_*
+!firmware/components/*/test/test_*.c
+!firmware/components/*/test/test_*.cpp
+!firmware/components/*/test/test_*.h
+!firmware/components/*/test/test_*.hpp
+
+# Mess- und Session-Artefakte einzelner Untersuchungen. Verzeichnis als Ganzes
+# ignorieren und bei Bedarf per '!' freigeben (Footprint-Regel) - der
+# Pre-Build-Hook macht sonst 'git add -A' und sammelt sie wieder ein.
+test/freq_2026-08-22/
+
+# AVR-Build-Artefakte (avr/dudette2) — aus den Quellen mit `make` reproduzierbar
+avr/**/*.elf
+avr/**/*.hex
+avr/**/*.map
+
+# Tagesplaene/Session-Artefakte mit Lab-Bezug bleiben lokal
+notes/dudette_v2_plan_*.md
+
+# Deploy-Ziele (Lab-Hosts) — nie ins Repo
+firmware/tools/deploy.conf

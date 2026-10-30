@@ -1,0 +1,26 @@
+menu "CULFW32: W5500 Ethernet (J1)"
+    depends on CULFW32_BUILD_NET_W5500
+
+    # Pinbelegung CUL60.sch, Steckverbinder J1 (FH34SRJ-14S), Platine W5500EXT.
+    # SCLK/MISO/MOSI sind die CC1101-Pins (CULFW32_CC1101_PIN_*), der Bus
+    # gehoert dem CC1101-Treiber; hier stehen nur die W5500-eigenen Leitungen.
+    #   J1.13 = RXD0 = GPIO17  -> W5500 SCSn (deshalb kein UART0 mit Platine)
+    #   J1.4  =        GPIO0   -> W5500 INTn
+    # Ein Reset-Pin fuehrt der Steckverbinder nicht.
+
+    config CULFW32_W5500_PIN_CS
+        int "Pin SCSn"
+        default 17
+
+    config CULFW32_W5500_PIN_INT
+        int "Pin INTn"
+        default 0
+
+    config CULFW32_W5500_SPI_CLOCK_HZ
+        int "SPI clock (Hz)"
+        range 1000000 33000000
+        # W5500 DS v1.1.0 S. 61: 33,3 MHz garantiert. 20 MHz wie TUL32 mit
+        # derselben Platine; auf CUL60 haengt am Bus zusaetzlich der CC1101-Stub.
+        default 20000000
+
+endmenu

@@ -1,0 +1,54 @@
+menu "CULFW32: NVS EEPROM (culfw EEPROM emulation)"
+
+    config CULFW32_EEPROM_SIZE
+        int "EEPROM size in bytes (a-culfw CUL_V3 = 1024)"
+        range 256 8192
+        default 1024
+
+    config CULFW32_EEPROM_I2C
+        bool "culfw-EEPROM im I2C-EEPROM U1 (M24C32) halten, NVS als Spiegel"
+        default y
+        help
+            CUL32-Verkaufsstuecke tragen U1 (M24C32, CUL60.sch). Das Abbild
+            liegt dann dort und ueberlebt wie beim AVR-CUL jedes Flashen, auch
+            das Factory-Image des Web-Flashers. Ohne Baustein (Laborboards)
+            arbeitet die Firmware wie bisher nur mit NVS.
+
+    config CULFW32_EEPROM_I2C_SDA
+        int "Pin SDA"
+        depends on CULFW32_EEPROM_I2C
+        default 22
+
+    config CULFW32_EEPROM_I2C_SCL
+        int "Pin SCL"
+        depends on CULFW32_EEPROM_I2C
+        default 23
+
+    config CULFW32_EEPROM_I2C_WC
+        int "Pin WC (high = schreibgeschuetzt, -1 = nicht verbunden)"
+        depends on CULFW32_EEPROM_I2C
+        default 15
+
+    config CULFW32_EEPROM_I2C_ADDR
+        hex "I2C-Adresse (7 bit)"
+        depends on CULFW32_EEPROM_I2C
+        default 0x50
+
+    config CULFW32_EEPROM_I2C_HZ
+        int "SCL-Frequenz (Hz)"
+        depends on CULFW32_EEPROM_I2C
+        range 100000 400000
+        default 400000
+
+    config CULFW32_EEPROM_I2C_BASE
+        hex "Startadresse des culfw-Abbilds im M24C32"
+        depends on CULFW32_EEPROM_I2C
+        range 0x0 0x300
+        default 0x0
+        help
+            Das Abbild muss ganz in den CULFW32-Bereich 0x0000..0x03FF passen,
+            sonst bricht der Build ab. 0x0400..0x07ED gehoert q-culfw, ab
+            0x07F0 liegen Scratch des Selbsttests und der Werksdatensatz
+            (0x0800, "BWFD").
+
+endmenu

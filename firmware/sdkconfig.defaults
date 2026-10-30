@@ -1,0 +1,77 @@
+# Vollstaendige Projektkonfiguration: alles, was vom ESP-IDF-Default abweicht.
+# Aus der gebauten Konfiguration erzeugen mit `idf.py save-defconfig` und mit den
+# Erklaerungen hier abgleichen; ein Build ohne firmware/sdkconfig muss dasselbe
+# Image ergeben.
+
+# Target.
+CONFIG_IDF_TARGET="esp32c6"
+
+# 4 MB Flash mit eigener Partitionstabelle (partitions.csv: zwei OTA-Slots).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+# Frontends, die per Kconfig abschaltbar sind und im Versand-Image an sind.
+CONFIG_CULFW32_BUILD_FRONTEND_JSON=y
+CONFIG_CULFW32_BUILD_FRONTEND_HMUARTLGW=y
+CONFIG_CULFW32_BUILD_FRONTEND_WEBUI=y
+
+# Web-UI-Terminal und Live-Push laufen ueber WebSocket.
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# C++: keine Exceptions / RTTI -> Code-Size, IRQ-Stack-freundlich.
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+
+# USB-Serial-JTAG als stdout (ESP32-C6 hat das eingebaut, kein TinyUSB noetig fuer culfw-tty).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Mainline-Logging vorerst Info-Level, im Feld via menuconfig pro Modul tunbar.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Watchdog-Tasks-IDLE ja, sonst kann ein blockierendes RX-Read einen Reboot triggern.
+CONFIG_ESP_TASK_WDT_INIT=y
+
+# FreeRTOS-Trace-Facility fuer uxTaskGetSystemState in `?stats` (Stack-Highwater-
+# Tabelle). +~3 KB RAM, kein nennenswerter Code-Overhead. Wird vom system_monitor-
+# Component genutzt um Stack-Auslastung pro Task zu reporten.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+
+# Socket-Pool fuer parallel: 5 TCP-Server-Listen-Sockets (ASCII 2323, JSON 2324,
+# HMUARTLGW Legacy 2325, SignalDuino 2326, HMUARTLGW Dual 2327) + httpd
+# (max_open_sockets=13) + per-Listener akzeptierte Client-Sockets + mDNS + Reserve.
+# 16 war zu eng — JSON/HMU-Listener verloren intermittent ihren Slot, Connections
+# liefen ins Timeout (verifiziert 2026-05-01 Build 0.1.157).
+# 24 gibt 5+13+6 Headroom fuer mehrere parallele Browser-Sessions + smoke-Tests.
+CONFIG_LWIP_MAX_SOCKETS=24
+
+# Online-Update (components/ota_update): ein per OTA geladenes Image startet als
+# PENDING_VERIFY und wird erst nach stabilem Lauf freigegeben, sonst bootet der
+# Bootloader das vorige. Steckt im BOOTLOADER — der kommt nur per USB/Web-Flasher
+# aufs Geraet, also muss es im Versand-Image schon an sein.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# TLS fuer das Online-Update spricht nur mit install.busware.de (Let's Encrypt,
+# Kette endet heute ueber die Gegenzeichnung bei ISRG Root X1). X1/X2 stehen im
+# "common"-Buendel genauso wie im vollen; das volle kostet ~45 KB mehr.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+
+# TLS-Puffer nur bei Bedarf und so gross wie der Record (Online-Update). Mit
+# allen Netzdiensten ist der Heap knapp und zerteilt; feste 16 KB + 4 KB je
+# Sitzung scheiterten am 08.10. an mbedtls_ssl_setup (-0x7F00).
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+
+# WLAN-Code aus dem Flash statt aus dem IRAM. Auf dem C6 teilen sich IRAM und
+# DRAM einen SRAM — jedes KB hier ist Heap. Ueber WLAN brauchte der TLS-Handshake
+# des Online-Updates mehr als die ~56 KB, die mit allen Netzdiensten frei sind
+# (08.10.: alloc(4437) failed, Heap-Minimum 1,5 KB). Der Durchsatz, den die
+# Optionen kaufen, braucht ein CUL nicht. Power-Save ist aus (WIFI_PS_NONE),
+# der SLP-Pfad laeuft also nie.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
+CONFIG_PM_SLEEP_FUNC_IN_IRAM=n
+# Lightsleep-Code im IRAM: so in der ausgelieferten Konfiguration gesetzt.
+CONFIG_PM_SLP_IRAM_OPT=y

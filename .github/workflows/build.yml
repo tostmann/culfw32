@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Dirk Tostmann
+#
+# Reproduzierbarer Build der CULFW32-Firmware via offiziellem ESP-IDF-Container.
+# Loest auf jedem push + pull_request gegen main aus, plus tag-getriggert
+# (v*) ein Release mit den Image-Artefakten zum Download.
+#
+# Artefakte:
+#   - culfw32.bin                Application-Image (flashbar via esptool)
+#   - bootloader.bin             Bootloader
+#   - partition-table.bin        Partition-Table (4 MB OTA-Layout)
+#   - ota_data_initial.bin       Initial OTA-State
+#   - manifest.json              ESP-Web-Tools-kompatibler Manifest
+#                                (verwendbar auf install.busware.de)
+#
+# Lokales Aequivalent:
+#   docker run --rm -v "$PWD":/work -w /work/firmware \
+#     espressif/idf:v5.5.3 idf.py set-target esp32c6 build
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  esp32c6:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v5.5.3
+      options: --user root
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          cd firmware
+          idf.py set-target esp32c6
+          idf.py build
+
+      - name: Generate ESP-Web-Tools manifest
+        shell: bash
+        run: |
+          VERSION=$(cat firmware/version.txt 2>/dev/null || echo "0.0.0")
+          # Offsets matchen die Custom-Partition-Tabelle in firmware/partitions.csv:
+          #   bootloader   0x00000
+          #   part_table   0x08000
+          #   otadata      0x10000
+          #   ota_0 (app)  0x20000
+          cat > firmware/build/manifest.json <<EOF
+          {
+            "name": "CULFW32",
+            "version": "${VERSION}",
+            "funding_url": "https://busware.de",
+            "builds": [
+              {
+                "chipFamily": "ESP32-C6",
+                "parts": [
+                  { "path": "bootloader/bootloader.bin", "offset": 0 },
+                  { "path": "partition_table/partition-table.bin", "offset": 32768 },
+                  { "path": "ota_data_initial.bin", "offset": 65536 },
+                  { "path": "culfw32.bin", "offset": 131072 }
+                ]
+              }
+            ]
+          }
+          EOF
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: culfw32-esp32c6
+          path: |
+            firmware/build/culfw32.bin
+            firmware/build/bootloader/bootloader.bin
+            firmware/build/partition_table/partition-table.bin
+            firmware/build/ota_data_initial.bin
+            firmware/build/manifest.json
+            firmware/version.txt
+          retention-days: 30
+
+  release:
+    needs: esp32c6
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: culfw32-esp32c6
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/culfw32.bin
+            artifacts/bootloader/bootloader.bin
+            artifacts/partition_table/partition-table.bin
+            artifacts/ota_data_initial.bin
+            artifacts/manifest.json
+          generate_release_notes: true

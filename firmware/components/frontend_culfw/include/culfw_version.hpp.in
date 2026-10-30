@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Dirk Tostmann
+
+#pragma once
+
+// AUTO-GENERATED — wird von firmware/components/frontend_culfw/CMakeLists.txt
+// per configure_file() aus dem .hpp.in-Template gefuellt. NICHT direkt editieren —
+// nimm die Hand an firmware/build_number.txt (Counter, von scripts/bump_build.sh
+// inkrementiert) bzw. an `MAJOR`/`MINOR` in scripts/bump_build.sh.
+
+namespace culfw32 {
+
+// V-Befehl-Konstanten. Format-kompatibel zu a-culfw fncollection.c:407
+// damit FHEM 00_CUL.pm uns als CUL erkennt.
+//
+// Schema MAJOR.MINOR.<n> — n = Build-Counter, automatisch bei jedem
+// `idf.py build`/`flash` inkrementiert, beginnt mit jedem MAJOR.MINOR bei 0
+// (siehe firmware/scripts/bump_build.sh + idf_env.sh-Wrapper). version.txt wird parallel von ESP-IDF automatisch in
+// `esp_app_desc_t::version` gesetzt — OTA-Header tragen die gleiche Nummer.
+
+constexpr const char* CULFW_VERSION    = "@CULFW_VERSION_FULL@";
+constexpr const char* CULFW_FW_NAME    = "CULFW32";
+constexpr const char* CULFW_BUILD_NUM  = "@CULFW_BUILD_NUM@";
+constexpr const char* CULFW_BUILD_DATE = __DATE__;
+constexpr const char* CULFW_BOARD_ID   = "CUL868";
+constexpr const char* CULFW_FBAND      = "868MHz";
+
+// Numeric Build-Number fuer Asset-Cache-Buster, ConfigRegistry, etc.
+constexpr int CULFW_BUILD_NUM_INT      = @CULFW_BUILD_NUM@;
+
+// VH-Variante: Hardware-Revision-String. Mit Hardware-Spin final fuellen.
+constexpr const char* CULFW_HW_REVISION = "CULFW32-rev0";
+
+} // namespace culfw32

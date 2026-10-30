@@ -1,0 +1,278 @@
+menu "CULFW32 — Modul-Auswahl"
+
+    comment "Aktive Module bestimmen Code-Groesse und Feature-Set."
+    comment "Defaults sind so gesetzt, dass die Standard-Variante (alles an)"
+    comment "byte-genau dem aktuellen Build entspricht. Ein-/Ausschalten"
+    comment "einzelner Toggles erzeugt SKU-Varianten (HM-only, Sniffer, ..)."
+
+    menu "RF-Protokolle (CC1101)"
+
+        config CULFW32_BUILD_RF_MORITZ
+            bool "Moritz / MAX! (Z-Befehl)"
+            default y
+            help
+                Aktiviert die Moritz/MAX!/eq3-RF-Klasse. Frontend-Befehle
+                Zr/Zs/Zf/Za/Zw und AutoAck-Pfad. ~20 KB Code.
+
+        config CULFW32_BUILD_RF_ASKSIN
+            bool "AskSin / HomeMatic / BidCos (A-Befehl)"
+            default y
+            help
+                Aktiviert die HomeMatic-/BidCos-RF-Klasse mit Crypt-Codec,
+                CCA-Loop, Burst-Preamble. Inkl. AR-FUP-Mode. ~20 KB Code.
+
+        config CULFW32_BUILD_RF_SLOWRF
+            bool "SlowRF: FS20 / FHT / KS300 / EM (X/F/T/K/E-Befehle)"
+            default y
+            help
+                Aktiviert die SlowRF-OOK-Familie mit RMT-Backbone (RX+TX).
+                FS20/KS300/EM byte-genau a-culfw-kompatibel. ~25 KB Code.
+
+        config CULFW32_BUILD_RF_NATIVE
+            bool "rf_native: IT+ / PCA301 (N-Befehl)"
+            default y
+            help
+                Aktiviert die generische FSK-Bridge (3 Modes: IT+ 17k/9.5k,
+                PCA301 868.95 MHz). RX-only. ~10 KB Code.
+
+        config CULFW32_BUILD_RF_FASTRF
+            bool "fastrf: CC1101-P2P 250 kbps GFSK (f-Befehl)"
+            default y
+            help
+                Aktiviert die FastRF-Punkt-zu-Punkt-Klasse. ~10 KB Code.
+
+        config CULFW32_BUILD_RF_DUDETTE
+            bool "Dudette v2 (AVR-Funk-Bootloader, D-Befehle)"
+            default y
+            help
+              Bestandsliste startender AVR-Geraete ueber den Dudette-v2-Beacon
+              (868,4998 MHz, 100 kBaud GFSK).  Befehle D / Dr / Dx / Dl.
+
+        config CULFW32_BUILD_RF_WMBUS
+            bool "wMBus: T1 / S1 (b-Befehl)"
+            default y
+            help
+                Aktiviert die wireless-MBus-RF-Klasse (T1 100 kbaud /
+                S1 32.7 kbaud). 3-out-of-6-Codec, Manchester-Codec,
+                CRC-16/EN13757 (poly 0x3D65). RX + TX byte-genau a-culfw
+                rf_mbus.c. AES-Decoder folgt mit HMUARTLGW-Phase-4
+                (mbedtls + Per-Device-Key in NVS). ~15 KB Code.
+
+        config CULFW32_BUILD_RF_HMIP
+            bool "HmIP raw RX (PHY-only Sniffer, P-Befehl)"
+            default y
+            help
+                Aktiviert eine PHY-only HmIP-RF-Klasse (eq3 HomeMatic IP,
+                868.305 MHz, 2-FSK ~10 kbps, Whitening on). Register-Werte
+                byte-genau aus SPI-Tap am echten HmIP-RFUSB-Stick extrahiert.
+
+                NUR EMPFANG. Roher Hex-Dump empfangener Frames als
+                `P<len><payload><rssi><lqi> t=<ms> n=<seq>`, ohne Auswertung
+                des Inhalts. Befehle: `Pr` RX ein, `Px` RX aus, `P` aus.
+
+                Bewusst NICHT enthalten: Senden (`Ps`), MAC-Layer mit
+                Quittung, Pairing/Inclusion und jede Kryptographie. Wer HmIP
+                sprechen statt nur mithoeren will, nimmt q-culfw. ~8 KB Code.
+    endmenu
+
+    menu "Transports"
+
+        comment "USB-CDC ist immer aktiv (primaere Konsole)."
+        comment "Hinweis: Off-Pfad fuer UART/TCP/WiFi noch nicht voll implementiert"
+        comment "(Frontend-Refactor folgt in v1.x). Toggle blendet aktuell nur den"
+        comment "register_protocol-Pfad in main.cpp aus; die Sources bleiben im Image."
+
+        config CULFW32_BUILD_TRANSPORT_UART
+            bool "UART0 ueber USB-C SBU1/SBU2 (38400 8N1)"
+            default y
+            help
+                Zweiter Transport fuer benachbarten Mikrocontroller via SBU-Pads.
+                ~5 KB Code.
+
+        config CULFW32_BUILD_TRANSPORT_TCP
+            bool "TCP-Server (Port konfigurierbar via EWP)"
+            default y
+            depends on CULFW32_BUILD_NET_WIFI
+            help
+                Aktiviert den TCP-Server (Default Port 2323). Benoetigt einen
+                aktiven Netzwerk-Stack (WiFi oder W5500). ~10 KB Code.
+
+        config CULFW32_BUILD_TRANSPORT_HBRFETH_UDP
+            bool "HB-RF-ETH UDP-Tunnel (eq-3 OCCU/rfd-Klone)"
+            default y
+            depends on CULFW32_BUILD_NET_WIFI && CULFW32_BUILD_FRONTEND_HMUARTLGW
+            help
+                Emuliert das HB-RF-ETH-Hardware-Bridge-Protokoll auf UDP-Port
+                3008 plus mDNS-Service `_raw-uart._udp`. Macht CULFW32 fuer
+                debmatic / piVCCU / RaspberryMatic / CCU3 als ueber Ethernet
+                angeschlossenen HM-MOD-RPI-PCB sichtbar — User braucht nur
+                `apt install hb-rf-eth` auf dem CCU-Host. ~10 KB Code.
+
+    endmenu
+
+    menu "Netzwerk-Stack"
+
+        config CULFW32_BUILD_NET_WIFI
+            bool "WiFi (Provisioning via EW*-Familie + mDNS)"
+            default y
+            help
+                Aktiviert den WiFi-Stack (esp_wifi + lwip + mDNS) und die
+                EW*-Provisioning-Befehle. ~120 KB Code (groesster Block!).
+                Hinweis: aktuell wird der WiFi-Source-Code immer mitgebaut;
+                der Toggle blendet nur den Aufruf-Pfad in main.cpp aus.
+                Voller Off-Pfad kommt mit dem Frontend-Refactor in v1.x.
+
+        config CULFW32_BUILD_NET_W5500
+            bool "W5500 Ethernet (Erweiterungsplatine an J1)"
+            default y
+            depends on CULFW32_BUILD_TRANSPORT_TCP
+            select ETH_USE_SPI_ETHERNET
+            select ETH_SPI_ETHERNET_W5500
+            help
+                SPI-Ethernet ueber den W5500 auf der Erweiterungsplatine an J1
+                (CUL60.sch, Platine W5500EXT wie beim TUL32). Die Platine ist
+                optional: die Firmware sucht sie beim Boot (VERSIONR = 0x04 plus
+                Schreib-/Lesetest) und startet Ethernet nur, wenn sie antwortet.
+                Konfiguration byte-genau a-culfw/CUNO (Wi*/Ri*, Ei/Ec/Ed).
+                GPIO17 ist zugleich U0RXD — mit gesteckter Platine entfaellt
+                der UART0-Transport auf USB-C SBU. ~15 KB Code.
+
+    endmenu
+
+    menu "Frontends"
+
+        comment "ASCII culfw-Frontend (kKnownTags) ist immer aktiv."
+
+        config CULFW32_BUILD_FRONTEND_JSON
+            bool "JSON line-protocol Frontend"
+            default n
+            depends on CULFW32_BUILD_TRANSPORT_TCP
+            help
+                JSON-Frontend ueber separatem TCP-Port (Default 2324). Iteriert
+                die ConfigRegistry, schreibt Status- und RX-Events als JSON-Lines,
+                akzeptiert get/set/dump/ping als Client-Commands. Voraussetzung
+                fuer Mini-Web-UI und HASS-Integration. ~15 KB Code + cJSON ~10 KB.
+
+        config CULFW32_TCP_JSON_PORT_DEFAULT
+            int "Default JSON TCP-Port"
+            default 2324
+            depends on CULFW32_BUILD_FRONTEND_JSON
+            range 1 65535
+            help
+                Default-Port fuer den JSON-TCP-Server. Wird beim ersten Boot ins
+                EE geschrieben und ist danach via `?json.port=<n>` aenderbar.
+
+        config CULFW32_BUILD_FRONTEND_HMUARTLGW
+            bool "HMUARTLGW-Emulationsfrontend (HM-MOD-RPI-PCB-Klone)"
+            default n
+            depends on CULFW32_BUILD_TRANSPORT_TCP && CULFW32_BUILD_RF_ASKSIN
+            help
+                FHEM-/debmatic-/RaspberryMatic-kompatibles UART-Wrapper-
+                Frontend (0xfd-binary, CRC-16 0x8005/0xd77f). FHEM-Define:
+                `HMUARTLGW uart://<ip>:<port>`. Setzt AskSin-RF-Klasse
+                voraus — die HMUARTLGW-Schicht ist nur der Wrapper.
+                Phase v1 ohne AES (Storage-only); Phase v1.x+1 mit AES.
+
+        config CULFW32_HMU_PORT_DEFAULT
+            int "Default HMUARTLGW TCP-Port"
+            default 2325
+            depends on CULFW32_BUILD_FRONTEND_HMUARTLGW
+            range 1 65535
+            help
+                Listen-Port fuer den HMUARTLGW-Server. Persistent ueber
+                EE-Adresse 0x123 LE — nach Erstboot via ConfigRegistry-Key
+                `hmu.port` aenderbar.
+
+        config CULFW32_BUILD_FRONTEND_SIGNALDUINO
+            bool "SIGNALduino-Emulationsfrontend (Pulse-Capture, 868 MHz OOK)"
+            default y
+            depends on CULFW32_BUILD_TRANSPORT_TCP
+            help
+                FHEM-SIGNALduino-kompatibles Frontend ueber separatem TCP-Port
+                (Default 2326). Klassifiziert OOK-Pulse aus dem RMT-Backbone in
+                Pattern-Slots P0..P7 und emittiert MU/MS/MC-Frames im Wire-Format
+                des SIGNALduino-Stacks. FHEM-Define:
+                `define <name> SIGNALduino <ip>:<port>`. RX-only in v1.
+
+        config CULFW32_TCP_SD_PORT_DEFAULT
+            int "Default SIGNALduino TCP-Port"
+            default 2326
+            depends on CULFW32_BUILD_FRONTEND_SIGNALDUINO
+            range 1 65535
+            help
+                Listen-Port fuer den SIGNALduino-Server. Persistent ueber
+                EE-Adresse 0x117 LE — nach Erstboot via ConfigRegistry-Key
+                `sd.port` aenderbar.
+
+        config CULFW32_BUILD_FRONTEND_HASS_MQTT
+            bool "HASS MQTT-Bridge mit Auto-Discovery (TODO)"
+            default n
+            depends on BROKEN
+            help
+                Geplant: MQTT-Client publisht Discovery-Topics fuer HASS.
+
+        config CULFW32_BUILD_FRONTEND_WEBUI
+            bool "Web-UI (HTTP + WebSocket, eingebettete HTML/CSS/JS)"
+            default n
+            depends on CULFW32_BUILD_FRONTEND_JSON
+            help
+                Embedded Web-UI mit Tabs (Config/Terminal). HTTP-Server auf
+                Port 80, WS-Endpoints /ws/json (Config-Tab) und /ws/tty
+                (Terminal-Tab gegen ASCII-Frontend). Statische Assets
+                (HTML/CSS/JS gz'd, Busware-Logo) embedded ins Binary.
+                ~50 KB Code (esp_http_server + Routing) + ~26 KB Assets.
+
+        config CULFW32_HTTP_PORT_DEFAULT
+            int "Default HTTP-Port"
+            default 80
+            depends on CULFW32_BUILD_FRONTEND_WEBUI
+            range 1 65535
+            help
+                Listen-Port fuer den HTTP-/WebSocket-Server.
+
+    endmenu
+
+    menu "Provisioning"
+
+        config CULFW32_BUILD_IMPROV_SERIAL
+            bool "Improv-Serial WiFi-Provisioning (USB-Serial-JTAG, install.busware.de)"
+            default y
+            depends on CULFW32_BUILD_NET_WIFI
+            help
+                Improv-Serial WiFi-Provisioning ueber USB-Serial-JTAG. Laeuft
+                in einem Fenster nach dem Boot (120 s ohne, 30 s mit
+                gespeicherten Zugangsdaten, jeweils ab dem letzten Improv-Byte,
+                hoechstens 1 h) parallel zum normalen ASCII-Frontend (kein
+                Verschlucken von Bytes). Wenn der ESP-Web-Tools-Flow auf install.busware.de
+                Improv-Magic-Bytes sendet, antwortet die Lib mit
+                Device-Info / Scan-Result / WIFI_SETTINGS-State, danach
+                schreibt der onConnected-Callback SSID+PSK in die normale
+                culfw32_wifi-NVS. Nach Window-Ablauf ist die Lib silent —
+                Re-Provisioning per Reboot. ~12 KB Code.
+
+        config CULFW32_IMPROV_WINDOW_MS
+            int "Improv-Fenster ohne gespeicherte WLAN-Zugangsdaten (ms)"
+            default 120000
+            depends on CULFW32_BUILD_IMPROV_SERIAL
+            range 10000 600000
+            help
+                So lange nach dem letzten Improv-Byte vom Host lauscht der
+                Parser noch, wenn beim Boot keine SSID gespeichert ist
+                (Erstprovisionierung, z. B. install.busware.de). busware-weite
+                Vorgabe: 120 s. Unabhaengig davon schliesst das Fenster
+                spaetestens 1 h nach dem Boot.
+
+        config CULFW32_IMPROV_WINDOW_CREDS_MS
+            int "Improv-Fenster mit gespeicherten WLAN-Zugangsdaten (ms)"
+            default 30000
+            depends on CULFW32_BUILD_IMPROV_SERIAL
+            range 10000 600000
+            help
+                Wie oben, wenn beim Boot eine SSID gespeichert ist -- auch wenn
+                die Station verbunden ist. busware-weite Vorgabe: 30 s; genug,
+                um das WLAN schnell zu wechseln, und solange das Fenster offen
+                ist, verbindet der Stick die Station nicht selbst neu.
+
+    endmenu
+
+endmenu

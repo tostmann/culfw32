@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Dirk Tostmann
+#
+# Wird von Espressif's idf-component-manager geparst.
+# Gegen eine lokale Kopie der Lib bauen: git/version/path unten voruebergehend
+# durch
+#     path: <lokale Kopie>/components/improv_wifi_busware
+# ersetzen, danach diese Datei und dependencies.lock zuruecklegen.
+# EXTRA_COMPONENT_DIRS reicht nicht: die hier gepinnte Kopie in
+# managed_components/ gewinnt, auch nach dem Loeschen -- reconfigure holt sie
+# neu (gemessen 2026-10-11, IDF 5.5.3).
+
+dependencies:
+  improv_wifi_busware:
+    # busware-Variante der Improv-Serial-WiFi-Lib (urspruenglich jnthas, MIT).
+    # Wir pinnen auf einen festen Commit, damit Release-Builds reproduzierbar
+    # sind. Bump bei Bedarf — neue Lib-Releases werden mit Tag versehen, dann
+    # kann hier `version: vX.Y.Z` statt der SHA stehen.
+    # 2026-06-12: alter Pin 8e3a17817f… wurde upstream per force-push/rebase
+    # entfernt (Branch master→main); der component-manager-Fetch schlug mit
+    # „Git reference … doesn't exist" fehl. Neuer Pin = aktueller main-HEAD.
+    # 2026-10-11: 486c3ef — der SCAN_DONE-Handler der Lib holt nur noch die
+    # Treffer ihrer eigenen Suche ab; vorher lieferte `EWS` immer 0 Netze.
+    # (Dazwischen 31cfd22: nur das Arduino-Backend, hier nicht kompiliert.)
+    git: https://github.com/tostmann/improv-wifi-busware.git
+    version: 486c3efb9ea2de95ee179aa5d230b6065db1b54d
+    path: components/improv_wifi_busware

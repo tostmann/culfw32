@@ -1,0 +1,36 @@
+menu "CULFW32: UART Transport (USB-C SBU)"
+
+    config CULFW32_UART_PORT
+        int "UART port (0=UART0, 1=UART1)"
+        range 0 1
+        default 0
+        help
+            UART0 ist auf ESP32-C6 frei wenn ESP_CONSOLE_USB_SERIAL_JTAG primary
+            console ist (default in CULFW32). UART0 wird in der CULFW32-Hardware
+            ueber die USB-C SBU1/SBU2 Pins nach aussen gefuehrt, damit ein
+            zweiter Mikrocontroller die culfw-Daten direkt seriell mitlesen kann.
+
+    config CULFW32_UART_BAUD
+        int "Baud rate"
+        default 38400
+        help
+            38400 8N1 — kompatibel mit dem klassischen busware-CUL Default-Tempo
+            und ausreichend Headroom fuer culfw Frame-Bursts.
+
+    config CULFW32_UART_PIN_TX
+        int "Pin TX"
+        default 16
+        help
+            CUL32-Serienhardware (CUL60.sch): U0TXD = GPIO16 (Modul-Pad 31) geht
+            auf USB-C SBU1 und zusaetzlich auf FFC J1.12. GPIO16/17 sind auf dem
+            ESP32-C6 die IOMUX-UART0-Pins (ESP32-C6-MINI-1 Datenblatt Tab. 3-1),
+            kollidieren also nicht mehr mit dem CC1101-SPI (18..21).
+
+    config CULFW32_UART_PIN_RX
+        int "Pin RX"
+        default 17
+        help
+            U0RXD = GPIO17 (Modul-Pad 30), kommt ueber R12 (499R) von USB-C SBU2
+            und liegt auf FFC J1.13.
+
+endmenu

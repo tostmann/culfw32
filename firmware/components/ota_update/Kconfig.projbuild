@@ -1,0 +1,23 @@
+menu "CULFW32: Online-Update (install.busware.de)"
+
+    config CULFW32_OTA_MANIFEST_URL
+        string "Manifest-URL"
+        default "https://install.busware.de/CUL/busware-cul-culfw32.manifest"
+        help
+            esp-web-tools-Manifest des Web-Flashers mit `version` und
+            `ota.<chipFamily>.path` (Schema wie cdc2net). Zur Laufzeit per
+            `?ota.url=` ueberschreibbar (nur RAM, fuer Staging-Tests).
+
+    config CULFW32_OTA_CHIP_FAMILY
+        string "chipFamily-Schluessel im Manifest"
+        default "ESP32-C6"
+
+    config CULFW32_OTA_TEST_CRASH_S
+        int "NUR TEST: frisch per OTA geladenes Image nach N s abstuerzen lassen (0 = aus)"
+        default 0
+        help
+            Beweist das Rollback-Gate: ein Image mit diesem Wert stuerzt im
+            PENDING_VERIFY-Zustand ab, der Bootloader muss auf das vorige
+            zurueckfallen. In Produkt-Builds immer 0.
+
+endmenu

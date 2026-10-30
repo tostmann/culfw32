@@ -1,0 +1,15 @@
+menu "CULFW32: LED Driver"
+
+    config CULFW32_LED_PIN
+        int "LED GPIO"
+        default 8
+        help
+            CUL32-Serienhardware (CUL60.sch): LED1 (blau) haengt mit der Kathode
+            an GPIO8, die Anode ueber R3 (820R) an VDD -> active LOW. R2 (10k)
+            haelt den Strapping-Pin GPIO8 beim Boot high.
+
+    config CULFW32_LED_ACTIVE_LOW
+        bool "LED ist active LOW"
+        default y
+
+endmenu

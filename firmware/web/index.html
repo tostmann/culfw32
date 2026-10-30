@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (c) 2026 Dirk Tostmann -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CULFW32</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2374b836'/%3E%3Ctext x='10' y='42' font-family='Verdana' font-size='28' font-weight='bold' fill='white'%3E32%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css?v=5">
+</head>
+<body>
+<nav class="navbar">
+  <div class="navbar-brand">
+    <img src="/assets/busware_logo.png" alt="busware">
+    <span class="brand-title">CULFW32</span>
+    <span id="brand-version" class="brand-version" title="Firmware version / build">…</span>
+    <a id="brand-update" class="brand-update" href="#ota-card" hidden title="Firmware update available">update</a>
+    <span id="brand-uptime" class="brand-meta" title="Uptime since the last boot">…</span>
+    <span id="brand-reset" class="brand-meta brand-reset-ok" title="Reason of the last reset">…</span>
+    <span id="badge-state" class="status-badge status-unknown">…</span>
+  </div>
+  <div class="navbar-tabs">
+    <button class="tab active" data-tab="config">Config</button>
+    <button class="tab" data-tab="stats">Stats</button>
+    <button class="tab" data-tab="send">Send</button>
+    <button class="tab" data-tab="terminal">Terminal</button>
+  </div>
+</nav>
+
+<main class="container">
+
+  <!-- ============== Config Tab ============== -->
+  <section id="tab-config" class="tab-panel active">
+    <!-- HF-Frontend-Karte (RF-Status) — bewusst ganz oben, der wichtige Teil. -->
+    <div class="grid grid-rf">
+      <div class="card card-rf">
+        <div class="card-header">RF Frontend
+          <span class="rf-state-pill" id="rf-state-pill">…</span>
+        </div>
+        <div class="card-body card-rf-body">
+          <div class="rf-grid">
+            <div><b>Chip</b><span id="rf-chip">…</span></div>
+            <div><b>Mode</b><span id="rf-proto">…</span></div>
+            <div><b>Freq</b><span id="rf-freq">…</span> MHz</div>
+            <div><b>Mod</b><span id="rf-mod">…</span></div>
+            <div><b>Datarate</b><span id="rf-datarate">…</span> kbps</div>
+            <div><b>BW</b><span id="rf-bw">…</span> kHz</div>
+            <div><b>Deviation</b><span id="rf-dev">…</span> kHz</div>
+            <div><b>PA Idx</b><span id="rf-pa">…</span></div>
+          </div>
+          <div class="rf-rssi-row">
+            <div class="rf-rssi-label">
+              <b>RSSI / Noise</b>
+              <span id="rf-rssi" class="rf-rssi">…</span> dBm
+            </div>
+            <div class="rf-bar">
+              <div class="rf-bar-track"></div>
+              <div class="rf-bar-marker" id="rf-bar-marker"></div>
+              <div class="rf-bar-scale">
+                <span>−120</span>
+                <span>−105</span>
+                <span>−90</span>
+                <span>−75</span>
+                <span>−60</span>
+                <span>−45</span>
+                <span>−30</span>
+              </div>
+              <div class="rf-bar-hint">
+                <span>← weak signal / quiet noise floor</span>
+                <span>strong signal / loud noise →</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- TX-Credit Bar — "wann Schluss mit Lustig". Voll = darf senden;
+               niedrig = Duty-Cycle erschöpft, naechster TX wird mit LOVF abgewiesen. -->
+          <div class="rf-credit-row">
+            <div class="rf-credit-label">
+              <b>TX Credit</b>
+              <span id="rf-credit-pct" class="rf-credit-pct">…</span>
+              <small id="rf-credit-abs" class="rf-credit-abs">…</small>
+            </div>
+            <div class="rf-credit-bar">
+              <div class="rf-credit-track"></div>
+              <div class="rf-credit-fill" id="rf-credit-fill"></div>
+              <div class="rf-credit-hint">
+                <span>← send limit reached, next TX = LOVF</span>
+                <span>free to send →</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-header">Status</div>
+        <div class="card-body" id="status-box">
+          <div id="s-eth-row" hidden><b>Ethernet</b> <span id="s-eth">…</span></div>
+          <div><b>WiFi</b> <span id="s-wifi">…</span></div>
+          <div id="s-ip-row"><b>IP</b> <span id="s-ip">…</span></div>
+          <div id="s-rssi-row"><b>RSSI</b> <span id="s-rssi">…</span> dBm</div>
+          <div id="s-ssid-row"><b>SSID</b> <span id="s-ssid">…</span></div>
+        </div>
+      </div>
+      <!-- Online-Update: die Firmware prueft und installiert selbst
+           (?ota=check|install), die Karte zeigt ota.state/.latest/.progress. -->
+      <div class="card" id="ota-card" hidden>
+        <div class="card-header">Firmware</div>
+        <div class="card-body">
+          <div><b>Installed</b> <span id="ota-running">…</span></div>
+          <div><b>Latest</b> <span id="ota-latest">…</span></div>
+          <div id="ota-status" class="ota-status"></div>
+          <div id="ota-bar" class="ota-bar" hidden><div id="ota-bar-fill" class="ota-bar-fill"></div></div>
+          <div class="ota-actions">
+            <button type="button" class="btn-secondary" id="ota-check">Check for update</button>
+            <button type="button" class="btn-primary" id="ota-install" disabled>Install update</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">Actions</div>
+        <div class="card-body">
+          <button class="btn-secondary" onclick="refresh()">Reload</button>
+          <button class="btn-secondary" onclick="downloadJson()">Export as JSON</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="settings-host" class="settings"></div>
+  </section>
+
+  <!-- ============== Stats Tab ============== -->
+  <section id="tab-stats" class="tab-panel">
+    <!-- Globale RF-Counters: TX-Credit (gross), LOVF, total RX/TX, airtime. -->
+    <div class="grid stats-grid">
+      <div class="card stats-card stats-credit">
+        <div class="card-header">TX Credit</div>
+        <div class="card-body">
+          <div class="stat-big" id="st-credit-pct">…</div>
+          <small class="stat-sub" id="st-credit-abs">…</small>
+          <div class="rf-credit-bar">
+            <div class="rf-credit-track"></div>
+            <div class="rf-credit-fill" id="st-credit-fill"></div>
+          </div>
+          <small class="stat-hint">
+            +1 unit/s refill (a-culfw clock.c, MAX_CREDIT=900 = 9 s burst).
+            1 unit = 10 ms. EU limit 868 MHz: 1 % duty cycle (= 3600 units per hour).
+          </small>
+        </div>
+      </div>
+
+      <div class="card stats-card stats-lovf">
+        <div class="card-header">LOVF Events</div>
+        <div class="card-body">
+          <div class="stat-big" id="st-lovf">…</div>
+          <small class="stat-hint">TX attempts rejected because the TX credit was used up.</small>
+        </div>
+      </div>
+
+      <div class="card stats-card">
+        <div class="card-header">RX Total</div>
+        <div class="card-body">
+          <div class="stat-big" id="st-rx-total">…</div>
+          <small class="stat-hint">Frames, summed over all protocols.</small>
+        </div>
+      </div>
+
+      <div class="card stats-card">
+        <div class="card-header">TX Total</div>
+        <div class="card-body">
+          <div class="stat-big" id="st-tx-total">…</div>
+          <small class="stat-hint">Frames, summed over all protocols.</small>
+        </div>
+      </div>
+
+      <div class="card stats-card stats-airtime">
+        <div class="card-header">Total TX-Airtime</div>
+        <div class="card-body">
+          <div class="stat-big"><span id="st-airtime-s">…</span> s</div>
+          <small class="stat-sub" id="st-airtime-units">…</small>
+          <small class="stat-hint">10 ms units on air, summed since boot.</small>
+        </div>
+      </div>
+
+      <div class="card stats-card stats-heap">
+        <div class="card-header">Heap</div>
+        <div class="card-body">
+          <div class="stat-row"><span>free now</span><b id="st-heap-free">…</b></div>
+          <div class="rf-credit-bar">
+            <div class="rf-credit-track"></div>
+            <div class="rf-credit-fill" id="st-heap-bar"></div>
+          </div>
+          <div class="stat-row"><span>Watermark (low)</span><b id="st-heap-min">…</b></div>
+          <small class="stat-hint">Lowest free heap seen since boot.</small>
+        </div>
+      </div>
+
+      <!-- System / Stabilitaet — Uptime, Boot/Crash-Counter, Reset-Reason. -->
+      <div class="card stats-card stats-sys">
+        <div class="card-header">System</div>
+        <div class="card-body">
+          <div class="stat-row"><span>Uptime (Session)</span><b id="st-uptime">…</b></div>
+          <div class="stat-row"><span>Uptime (Total)</span><b id="st-uptime-total">…</b></div>
+          <div class="stat-row"><span>Boots</span><b id="st-boot-count">…</b></div>
+          <div class="stat-row"><span>Crashes</span><b id="st-crash-count">…</b></div>
+          <div class="stat-row"><span title="ESP32-C6 die temperature, not ambient">Chip temperature</span><b id="st-chip-temp">…</b></div>
+          <div class="stat-row"><span>Last reset</span><b id="st-reset-reason">…</b></div>
+          <small class="stat-hint" id="st-reset-text">…</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pro-Protokoll-Tabelle. Zeile pro Protocol mit RX/TX/Errors + Inline-Bars. -->
+    <div class="card">
+      <div class="card-header">Per-Protocol Counters</div>
+      <div class="card-body proto-table-wrap">
+        <table class="proto-table">
+          <thead>
+            <tr>
+              <th>Protocol</th>
+              <th>RX</th>
+              <th>RX Bytes</th>
+              <th>TX</th>
+              <th>TX Bytes</th>
+              <th>TX Airtime</th>
+              <th>Errors</th>
+              <th>Last RSSI</th>
+              <th>Last RX</th>
+            </tr>
+          </thead>
+          <tbody id="st-proto-tbody">
+            <!-- gefuellt von app.js -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== Send Tab ============== -->
+  <section id="tab-send" class="tab-panel">
+    <div class="card">
+      <div class="card-header">Send RF frame
+        <small class="card-sub">via JSON frontend <code>cmd:"tx"</code></small>
+      </div>
+      <div class="card-body">
+        <div class="send-grid">
+          <label>Protocol</label>
+          <select id="send-proto">
+            <option value="slowrf" selected>SlowRf (FS20 / KS300 / EM)</option>
+            <option value="moritz">Moritz (MAX!)</option>
+            <option value="asksin">AskSin (HomeMatic / BidCos)</option>
+            <option value="fastrf">FastRf (CC1101-P2P)</option>
+            <option value="native" disabled>Native (read-only)</option>
+          </select>
+
+          <label class="send-cond" data-show="slowrf">Kind</label>
+          <select id="send-kind" class="send-cond" data-show="slowrf">
+            <option value="fs20" selected>FS20</option>
+            <option value="ks300">KS300</option>
+            <option value="em">EM (exactly 9 bytes)</option>
+          </select>
+
+          <label class="send-cond" data-show="slowrf">Repeat</label>
+          <input id="send-repeat" type="number" min="1" max="15" value="3"
+                 class="send-cond" data-show="slowrf">
+
+          <label class="send-cond" data-show="moritz">Long-Preamble</label>
+          <div class="send-cond" data-show="moritz" style="align-self:center">
+            <input id="send-longpre" type="checkbox">
+            <small>(Zs vs Zf — wakes sleeping MAX! receivers)</small>
+          </div>
+
+          <label>Hex</label>
+          <input id="send-hex" type="text" placeholder="e.g. 12345600"
+                 spellcheck="false" autocomplete="off"
+                 style="font-family:'Consolas','Menlo',monospace; text-transform:uppercase">
+
+          <label></label>
+          <div>
+            <button class="btn-primary" id="send-go">Send</button>
+            <button class="btn-secondary" id="send-clear-log">Clear log</button>
+            <span id="send-validate" class="send-validate"></span>
+          </div>
+        </div>
+
+        <div class="send-presets">
+          <small>Quick-Presets:</small>
+          <button class="btn-mini preset" data-proto="slowrf" data-kind="fs20"  data-hex="12345600">FS20 12345600</button>
+          <button class="btn-mini preset" data-proto="slowrf" data-kind="fs20"  data-hex="66666600">FS20 66666600</button>
+          <button class="btn-mini preset" data-proto="slowrf" data-kind="em"    data-hex="0205E7000000000000">EM 0205…</button>
+          <button class="btn-mini preset" data-proto="slowrf" data-kind="ks300" data-hex="E7E0091205">KS300 E7E0…</button>
+          <button class="btn-mini preset" data-proto="moritz" data-hex="0B860061123456000000007E2A">Moritz Z 0B86…</button>
+        </div>
+
+        <div class="send-help">
+          <small>
+            <b>Hex format</b> depends on the protocol — same scheme as the ASCII frontend
+            <code>F&lt;hex&gt;</code> / <code>Z&lt;hex&gt;</code> / <code>A&lt;hex&gt;</code> /
+            <code>K&lt;hex&gt;</code> / <code>E&lt;hex&gt;</code>:
+            <ul>
+              <li><b>FS20</b>: 4–8 bytes (housecode 2 + addr 1 + cmd 1 [+ extension])</li>
+              <li><b>KS300</b>: 1–12 bytes</li>
+              <li><b>EM</b>: <b>exactly 9 bytes</b>, otherwise LENERR</li>
+              <li><b>Moritz / AskSin</b>: the first byte is the <b>length</b>, then the payload (= length bytes)</li>
+              <li><b>FastRf</b>: raw bytes (the CC1101 adds the length byte itself)</li>
+            </ul>
+          </small>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">TX-Log
+        <small class="card-sub" id="send-log-count">0 entries</small>
+      </div>
+      <div class="card-body">
+        <table class="send-log-table">
+          <thead>
+            <tr><th>Time</th><th>Proto</th><th>Kind</th><th>Hex</th><th>OK</th><th>Err</th></tr>
+          </thead>
+          <tbody id="send-log-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== Terminal Tab ============== -->
+  <section id="tab-terminal" class="tab-panel">
+    <div class="card terminal-card">
+      <div class="card-header">
+        culfw Terminal
+        <span class="terminal-status" id="term-state">disconnected</span>
+        <button class="btn-mini" onclick="termClear()" title="Clear output">clear</button>
+      </div>
+      <pre id="term-output" class="term-output"></pre>
+      <div class="term-input-row">
+        <span class="term-prompt">&gt;</span>
+        <input id="term-input" type="text" autocomplete="off" autocapitalize="off"
+               spellcheck="false" placeholder="V, t, ??, EWS, …">
+      </div>
+      <div class="term-help">
+        <small>↑/↓ history, Enter sends, Ctrl-L clears. Examples: <code>V</code>,
+        <code>??</code>, <code>?wifi.state</code>, <code>EWS</code></small>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <span>CULFW32 by busware</span> ·
+  <span>© 2026 Dirk Tostmann</span> ·
+  <span>Free software under the <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank">GNU GPL v3 or later</a>, without any warranty</span> ·
+  <span><a id="footer-source" href="https://github.com/tostmann/culfw32" target="_blank">Source</a></span> ·
+  <span><a href="https://github.com/tostmann/a-culfw" target="_blank">a-culfw</a></span> ·
+  <span id="footer-build">…</span>
+</footer>
+
+<script src="/app.js?v=6"></script>
+</body>
+</html>
