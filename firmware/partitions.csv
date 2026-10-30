@@ -1,20 +1,20 @@
-# CULFW32 partition table — 4 MB Flash, OTA-faehig.
+# CULFW32 partition table — 4 MB flash, OTA-capable.
 #
-# Layout-Plan:
-#   bootloader  0x0000  ..  0x8000   (32 KB) — fest, ESP-IDF
-#   part_table  0x8000  ..  0x9000   (4 KB)  — diese Datei
-#   nvs         0x9000  .. 0x10000   (28 KB) — culfw_ee + culfw32_wifi-Namespace
-#   otadata     0x10000 .. 0x12000   (8 KB)  — A/B-Slot-Selector
+# Layout plan:
+#   bootloader  0x0000  ..  0x8000   (32 KB) — fixed, ESP-IDF
+#   part_table  0x8000  ..  0x9000   (4 KB)  — this file
+#   nvs         0x9000  .. 0x10000   (28 KB) — culfw_ee + culfw32_wifi namespace
+#   otadata     0x10000 .. 0x12000   (8 KB)  — A/B slot selector
 #   phy_init    0x12000 .. 0x13000   (4 KB)  — RF calibration
-#   (padding    0x13000 .. 0x20000           — 52 KB Alignment-Reserve)
-#   ota_0       0x20000 .. 0x1E0000  (1.75 MB) — App-Slot A (aktiv ab Erstboot)
-#   ota_1       0x1E0000 .. 0x3A0000 (1.75 MB) — App-Slot B (OTA-Ziel)
-#   storage     0x3A0000 .. 0x400000 (384 KB)  — SPIFFS fuer UI-Static-Files / Logs
+#   (padding    0x13000 .. 0x20000           — 52 KB alignment reserve)
+#   ota_0       0x20000 .. 0x1E0000  (1.75 MB) — app slot A (active from first boot)
+#   ota_1       0x1E0000 .. 0x3A0000 (1.75 MB) — app slot B (OTA target)
+#   storage     0x3A0000 .. 0x400000 (384 KB)  — SPIFFS for UI static files / logs
 #
-# Damit haben wir:
-#  - 1.75 MB pro App-Slot — aktuelle App ~1.01 MB, ~750 KB Headroom je Slot
-#  - rollback-faehiges OTA via esp_app_format
-#  - 384 KB Daten-Partition fuer kuenftige Mini-Web-UI / persistente Logs
+# This gives us:
+#  - 1.75 MB per app slot — current app ~1.01 MB, ~750 KB headroom per slot
+#  - rollback-capable OTA via esp_app_format
+#  - 384 KB data partition for a future mini web UI / persistent logs
 #
 # Name,    Type, SubType, Offset,  Size,    Flags
 nvs,       data, nvs,     0x9000,  0x7000,

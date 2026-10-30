@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 Dirk Tostmann
 #
-# Reproduzierbarer Build der CULFW32-Firmware via offiziellem ESP-IDF-Container.
-# Loest auf jedem push + pull_request gegen main aus, plus tag-getriggert
-# (v*) ein Release mit den Image-Artefakten zum Download.
+# Reproducible build of the CULFW32 firmware in the official ESP-IDF container.
+# Runs on every push + pull_request against main, plus a tag-triggered
+# (v*) release with the image artifacts for download.
 #
-# Artefakte:
-#   - culfw32.bin                Application-Image (flashbar via esptool)
-#   - bootloader.bin             Bootloader
-#   - partition-table.bin        Partition-Table (4 MB OTA-Layout)
-#   - ota_data_initial.bin       Initial OTA-State
-#   - manifest.json              ESP-Web-Tools-kompatibler Manifest
-#                                (verwendbar auf install.busware.de)
+# Artifacts:
+#   - culfw32.bin                application image (flashable with esptool)
+#   - bootloader.bin             bootloader
+#   - partition-table.bin        partition table (4 MB OTA layout)
+#   - ota_data_initial.bin       initial OTA state
+#   - manifest.json              ESP Web Tools-compatible manifest
+#                                (usable on install.busware.de)
 #
-# Lokales Aequivalent:
+# Local equivalent:
 #   docker run --rm -v "$PWD":/work -w /work/firmware \
 #     espressif/idf:v5.5.3 idf.py set-target esp32c6 build
 
@@ -51,7 +51,7 @@ jobs:
         shell: bash
         run: |
           VERSION=$(cat firmware/version.txt 2>/dev/null || echo "0.0.0")
-          # Offsets matchen die Custom-Partition-Tabelle in firmware/partitions.csv:
+          # Offsets match the custom partition table in firmware/partitions.csv:
           #   bootloader   0x00000
           #   part_table   0x08000
           #   otadata      0x10000
@@ -104,10 +104,12 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # upload-artifact keeps the paths below the common parent firmware/
           files: |
-            artifacts/culfw32.bin
-            artifacts/bootloader/bootloader.bin
-            artifacts/partition_table/partition-table.bin
-            artifacts/ota_data_initial.bin
-            artifacts/manifest.json
+            artifacts/build/culfw32.bin
+            artifacts/build/bootloader/bootloader.bin
+            artifacts/build/partition_table/partition-table.bin
+            artifacts/build/ota_data_initial.bin
+            artifacts/build/manifest.json
+          fail_on_unmatched_files: true
           generate_release_notes: true

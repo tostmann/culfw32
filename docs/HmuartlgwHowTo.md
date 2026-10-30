@@ -1,17 +1,17 @@
-# CULFW32 — HMUARTLGW-Frontend (FHEM/Homegear/RaspberryMatic-Anbindung)
+# CULFW32 — HMUARTLGW frontend (FHEM/Homegear/RaspberryMatic connection)
 
-CULFW32 emuliert das **HM-MOD-RPI-PCB** — eQ-3's Funkmodul fuer Raspberry-Pi-CCU-Klone — ueber TCP. FHEM, Homegear, debmatic, piVCCU oder RaspberryMatic sehen CULFW32 als ganz normalen HomeMatic-Funkstick und reden auf dem 0xfd-binary HMUARTLGW-Protokoll mit ihm.
+CULFW32 emulates the **HM-MOD-RPI-PCB** — eQ-3's radio module for Raspberry Pi CCU clones — over TCP. FHEM, Homegear, debmatic, piVCCU or RaspberryMatic see CULFW32 as an ordinary HomeMatic radio stick and talk to it using the 0xfd binary HMUARTLGW protocol.
 
-Wire-Protokoll: **0xfd-Frame-Wrapper, CRC-16 (poly 0x8005, init 0xd77f), Escape (0xfc + b^0x80), single-port TCP**. Identisch zum GPIO-direkt angeschlossenen HM-MOD-RPI-PCB; **nicht** der HM-CFG-LAN-Modus (anderes Protokoll mit ASCII-Wrapper + AES-Challenge — wird von CULFW32 nicht implementiert und ist nicht geplant).
+Wire protocol: **0xfd frame wrapper, CRC-16 (poly 0x8005, init 0xd77f), escape (0xfc + b^0x80), single-port TCP**. Identical to an HM-MOD-RPI-PCB connected directly via GPIO; **not** the HM-CFG-LAN mode (a different protocol with ASCII wrapper + AES challenge — not implemented by CULFW32 and not planned).
 
-> **Status 2026-04-28:** Phase 0..3 DONE byte-genau gegen FHEM-Docker + reale eQ-3 HomeMatic-Hardware:
-> - **HM-LC-Sw1-Pl-2** (Steckdose, HMID `2580F4`, FW 0xA1 = v1.6, Serial `KEQ0958686`) voll-pairing + `set on/off` physisch verifiziert (LED leuchtet/aus)
-> - **HM-PB-2-WM** (Wandtaster, HMID `19B5DF`, Serial `JEQ0064205`) DEVICE_INFO empfangen + autoCreate; Pair-Completion bei 2 m marginal wegen Test-Board-RX-Sensitivitaets-Asymmetrie (Hardware-Spin loest's)
-> - **AES** (Phase 4) bleibt offen — siehe AES-Sektion unten
+> **Status 2026-04-28:** phases 0..3 DONE, byte-exact against FHEM in Docker + real eQ-3 HomeMatic hardware:
+> - **HM-LC-Sw1-Pl-2** (plug-in switch, HMID `1A2B3C`, FW 0xA1 = v1.6): full pairing + `set on/off` verified physically (LED on/off)
+> - **HM-PB-2-WM** (wall push button, HMID `4D5E6F`): DEVICE_INFO received + autoCreate; pairing completion marginal at 2 m because of the test board's RX sensitivity asymmetry (the hardware spin solves this)
+> - **AES** (phase 4) remains open — see the AES section below
 
 ---
 
-## Architektur
+## Architecture
 
 ```
 ┌─────────────────────┐                  ┌──────────────────────────────┐
@@ -21,47 +21,47 @@ Wire-Protokoll: **0xfd-Frame-Wrapper, CRC-16 (poly 0x8005, init 0xd77f), Escape 
 │                     │                  │       │                      │
 │  CUL_HM/HM-Mod-     │                  │  RfManager                   │
 │  Rpi-Pcb-Driver     │                  │       │                      │
-│                     │                  │  AskSinRF  (Slot 0)          │
+│                     │                  │  AskSinRF  (slot 0)          │
 └─────────────────────┘                  │       │                      │
                                          │  CC1101 868.299 MHz GFSK     │
                                          │       │                      │
-                                         │       └─ Antenne ── Funk     │
+                                         │       └─ Antenna ── radio    │
                                          └──────────────────────────────┘
                                                                 │
                                                         ┌───────┴───────┐
                                                         │               │
                                                   HM-LC-Sw1-Pl-2   HM-PB-2-WM
-                                                  HMID 2580F4      HMID 19B5DF
+                                                  HMID 1A2B3C      HMID 4D5E6F
 ```
 
-Auf der Funkseite ist CULFW32 byte-genau a-culfw `rf_asksin.c` (verifiziert in Phase 2 gegen Lokales- und Remote-CUL868). Die Wrapper-Schicht ueber dem AskSin-Stack ist **clean-room gegen FHEM `00_HMUARTLGW.pm` reimplementiert** — `a-culfw` selbst spricht das HMUARTLGW-Protokoll nicht (das ist eQ-3-firmware-spezifisch, closed-source binary).
+On the radio side, CULFW32 is byte-exact to a-culfw `rf_asksin.c` (verified in phase 2 against a local and a remote CUL868). The wrapper layer above the AskSin stack is a **clean-room reimplementation against FHEM `00_HMUARTLGW.pm`** — `a-culfw` itself does not speak the HMUARTLGW protocol (it is specific to the eQ-3 firmware, a closed-source binary).
 
 ---
 
-## Voraussetzungen
+## Prerequisites
 
-- CULFW32-Image mit `CONFIG_CULFW32_BUILD_FRONTEND_HMUARTLGW=y` und `CONFIG_CULFW32_BUILD_RF_ASKSIN=y` (beides Default in den Standard-Builds)
-- WiFi verbunden (siehe [`NetworkHowTo.md`](NetworkHowTo.md))
-- TCP-Port (Default 2325) erreichbar vom Host der die Anbindung uebernimmt
-- FHEM mit `00_HMUARTLGW.pm` **oder** Homegear mit `Homegear-HomeMaticBidCoS` **oder** debmatic / piVCCU / RaspberryMatic mit `rfd`
+- CULFW32 image with `CONFIG_CULFW32_BUILD_FRONTEND_HMUARTLGW=y` and `CONFIG_CULFW32_BUILD_RF_ASKSIN=y` (both default in the standard builds)
+- WiFi connected (see [`NetworkHowTo.md`](NetworkHowTo.md))
+- TCP port (default 2325) reachable from the host that handles the connection
+- FHEM with `00_HMUARTLGW.pm` **or** Homegear with `Homegear-HomeMaticBidCoS` **or** debmatic / piVCCU / RaspberryMatic with `rfd`
 
 ---
 
-## FHEM — End-to-End Setup-Walkthrough
+## FHEM — end-to-end setup walkthrough
 
-Der getestete Pfad. Ergebnis: HomeMatic-Geraet pairt sich, Steuerbefehle gehen byte-genau on-air.
+The tested path. Result: the HomeMatic device pairs, control commands go on air byte-exact.
 
-### 1. CULFW32 IP herausfinden
+### 1. Find the CULFW32 IP
 
-Auf der CULFW32-ASCII-Konsole (USB-CDC oder per `nc <ip> 2323`):
+On the CULFW32 ASCII console (USB-CDC or via `nc <ip> 2323`):
 ```
 ?wifi.ip
 ? wifi.ip = 192.168.1.42  (str, ro)
 ```
 
-### 2. FHEM-Define mit `uart://`-Prefix
+### 2. FHEM define with the `uart://` prefix
 
-Im FHEM-Webfrontend in der Kommandozeile:
+In the FHEM web frontend, on the command line:
 
 ```fhem
 define myhm HMUARTLGW uart://192.168.1.42:2325
@@ -69,76 +69,76 @@ attr   myhm hmId F11234
 attr   myhm verbose 5
 ```
 
-> **Der `uart://`-Prefix ist Pflicht** — ohne ihn waehlt FHEM den HM-CFG-LAN-Modus (ASCII-Wrapper + AES-Challenge auf Port +1). Das ist ein anderes Protokoll, von CULFW32 nicht implementiert.
+> **The `uart://` prefix is mandatory** — without it, FHEM selects the HM-CFG-LAN mode (ASCII wrapper + AES challenge on port +1). That is a different protocol, not implemented by CULFW32.
 
-`hmId` ist die 3-Byte-CCU-Adresse, mit der CULFW32 sich gegenueber HomeMatic-Geraeten als CCU meldet. Frei waehlbar — am besten eine Hex-Zahl, die nicht mit existierenden Geraete-HMIDs kollidiert (z.B. `F11234`). Nach erstmaligem Setzen schreibt FHEM diese ID via `APP_SET_HMID` ins CULFW32-EE; persistiert ueber Reboot.
+`hmId` is the 3-byte CCU address with which CULFW32 presents itself as a CCU to HomeMatic devices. Free to choose — preferably a hex number that does not collide with existing device HMIDs (e.g. `F11234`). After it is set for the first time, FHEM writes this ID into the CULFW32 EE via `APP_SET_HMID`; it persists across reboots.
 
-### 3. Init-Sequenz beobachten
+### 3. Watch the init sequence
 
-Innerhalb von ~5 s sollte FHEM die 14-Schritt Init-Sequenz durchlaufen. `list myhm` zeigt:
+Within ~5 s, FHEM should run through the init sequence (see "Init sequence" below). `list myhm` shows:
 
 ```
 Internals:
-   model       HM-MOD-UART        ← FHEM erkennt CULFW32 als HM-MOD-UART-Klon
+   model       HM-MOD-UART        ← FHEM recognizes CULFW32 as an HM-MOD-UART clone
    STATE       opened
    Initialized 1
 Readings:
    cond        ok
    loadLvl     low
    D-firmware  1.4.1
-   D-serialNr  CULAABBCC          ← MAC-derived (von der WiFi-MAC der CULFW32)
-   D-HMIdAssigned   34            ← (= 0xF11234, FHEM strippt fuehrende Nullen)
+   D-serialNr  CULAABBCC          ← MAC-derived (from the CULFW32 WiFi MAC)
+   D-HMIdAssigned   34            ← (= 0xF11234, FHEM strips leading zeros)
    D-HMIdOriginal   34
    D-type      HM-MOD-UART
 ```
 
-### 4. Pair-Window oeffnen + Geraet anlernen
+### 4. Open the pairing window + teach in the device
 
 ```fhem
 set myhm hmPairForSec 300
 ```
 
-Dann am HomeMatic-Geraet **Pair-Knopf >4 Sekunden druecken** (Factory-Reset → Geraet vergisst den alten CCU-Master), kurz warten, dann **Pair-Knopf kurz druecken** (sendet DEVICE_INFO-Broadcast).
+Then **press the pair button on the HomeMatic device for >4 seconds** (factory reset → the device forgets the old CCU master), wait a moment, then **press the pair button briefly** (sends the DEVICE_INFO broadcast).
 
-FHEM autocreate erstellt das Geraet:
+FHEM autocreate creates the device:
 ```
-2026.04.28 23:19:29 CUL_HM pair: HM_2580F4 switch, model HM-LC-SW1-PL2 serialNr KEQ0958686
+2026.04.28 23:19:29 CUL_HM pair: HM_1A2B3C switch, model HM-LC-SW1-PL2 serialNr <serial>
 ```
 
-### 5. Schalten
+### 5. Switching
 
 ```fhem
-set HM_2580F4 on
-set HM_2580F4 off
+set HM_1A2B3C on
+set HM_1A2B3C off
 ```
 
-Die Steckdose schaltet, FHEM-Reading `level=100/0`, `state=on/off`.
+The plug-in switch switches; FHEM reading `level=100/0`, `state=on/off`.
 
-### 6. Optional: Cross-Sniff via zweiten CUL-Stick
+### 6. Optional: cross-sniff with a second CUL stick
 
-Mit einem zweiten USB-CUL (CUL868) parallel im `Ar`-Mode kann man die Funk-Frames byte-genau sehen:
+With a second USB CUL (CUL868) running in parallel in `Ar` mode, you can see the radio frames byte-exact:
 ```
-A 10 33 80 02 2580F4 F11234 01 01 C8 00 ::-42:myhm
+A 10 33 80 02 1A2B3C F11234 01 01 C8 00 ::-42:myhm
               ↑   ↑     ↑                ↑   ↑   ↑
             msg_nr  ACK-type            ch  state level
 ```
 
 ---
 
-## Homegear / debmatic / piVCCU / RaspberryMatic — `socat`-Bridge
+## Homegear / debmatic / piVCCU / RaspberryMatic — `socat` bridge
 
-Die eQ-3-OCCU-Tools (`rfd`, `HmIPServer.jar` — letzteres nur fuer HmIP-Linie, nicht relevant fuer HomeMatic-classic-CULFW32) und Homegear erwarten ein lokales Charakter-Device wie `/dev/raw-uart` oder `/dev/ttyAMA0`. CULFW32 spricht TCP. Bridge:
+The eQ-3 OCCU tools (`rfd`, `HmIPServer.jar` — the latter only for the HmIP line, not relevant for HomeMatic classic on CULFW32) and Homegear expect a local character device such as `/dev/raw-uart` or `/dev/ttyAMA0`. CULFW32 speaks TCP. Bridge:
 
-### Auf dem CCU-Host
+### On the CCU host
 
 ```bash
 sudo socat pty,link=/dev/cul32-uart,raw,echo=0,mode=666 \
            tcp:192.168.1.42:2325,reuseaddr,keepalive
 ```
 
-Hat den Effekt: alle Bytes auf TCP↔CULFW32 erscheinen 1:1 auf `/dev/cul32-uart`. Latenz +1-3 ms — fuer HMUARTLGW unerheblich.
+Effect: all bytes on TCP↔CULFW32 appear 1:1 on `/dev/cul32-uart`. Latency +1-3 ms — irrelevant for HMUARTLGW.
 
-### Homegear-Konfig (`/etc/homegear/families/homematicbidcos.conf`)
+### Homegear config (`/etc/homegear/families/homematicbidcos.conf`)
 
 ```ini
 [CULFW32-via-TCP]
@@ -146,10 +146,10 @@ id = CULFW32
 deviceType = hm-mod-rpi-pcb
 device = /dev/cul32-uart
 responseDelay = 95
-gpio1 = 0    # kein RST_N-GPIO weil TCP-Bridge — Homegear ignoriert dann
+gpio1 = 0    # no RST_N GPIO because of the TCP bridge — Homegear then ignores it
 ```
 
-Dann `homegear restart` und in der Homegear-CLI:
+Then `homegear restart`, and in the Homegear CLI:
 ```
 hg> families list
 hg> peers list
@@ -157,176 +157,175 @@ hg> peers list
 
 ### RaspberryMatic / debmatic / piVCCU
 
-Setze `/etc/config/cul32-bridge.service` (systemd-Unit) auf, dass der `socat`-Befehl beim Boot startet, und konfiguriere `rfd` so dass es `/dev/cul32-uart` statt der eingebauten `/dev/ttyS<n>` nutzt. `rfd.conf` Eintrag analog zu Homegear oben.
+Set up `/etc/config/cul32-bridge.service` (systemd unit) so that the `socat` command starts at boot, and configure `rfd` so that it uses `/dev/cul32-uart` instead of the built-in `/dev/ttyS<n>`. The `rfd.conf` entry is analogous to Homegear above.
 
-> **Status 2026-04-28/29**: Homegear- und rfd-Tests sind **noch nicht durchgefuehrt** (Lab-Folge-Item — siehe `hmuartlgw_status.md`). Source-Inspection von Homegear `Hm-Mod-Rpi-Pcb.cpp`:
+> **Status**: `rfd` (debmatic, RaspberryMatic) runs against the Dual port 2327, see [DebmaticHowTo](DebmaticHowTo.md). Homegear has not been tested against CULFW32. Source inspection of Homegear `Hm-Mod-Rpi-Pcb.cpp`:
 >
-> - Homegear erwartet beim Connect einen **unsolicited Push** des `Co_CPU_App`-Frames (passive listen + 5 s Timeout). FHEM dagegen sendet aktiv `OS_GET_APP` und reagiert auf Antwort.
-> - **Erste Implementierungs-Iteration mit Hello-Push** (Frame ans frische TCP-Socket schreiben sobald accept() durchgeht) hat FHEM in `cond=disconnected` getrieben — vermutlich kommen die Bytes vor FHEMs eigener Init-Setup-Komplettierung an. Push ist deshalb **deaktiviert**; OS_GET_APP-Active-Probe-Pattern (FHEM) funktioniert byte-genau.
-> - Fuer Homegear-Bringup wird voraussichtlich ein **delayed Hello-Push** noetig (z.B. 200 ms nach attach, damit FHEM seinen Setup beendet hat) — oder eine clientseitige Heuristik. Wird zur Bringup-Zeit gegen echtes Homegear/rfd verifiziert.
+> - On connect, Homegear expects an **unsolicited push** of the `Co_CPU_App` frame (passive listen + 5 s timeout). FHEM, in contrast, actively sends `OS_GET_APP` and reacts to the answer.
+> - The **first implementation iteration with a hello push** (write the frame to the fresh TCP socket as soon as accept() returns) drove FHEM into `cond=disconnected` — presumably the bytes arrive before FHEM has completed its own init setup. The push is therefore **disabled**; the OS_GET_APP active probe pattern (FHEM) works byte-exact.
+> - Homegear bring-up will probably need a **delayed hello push** (e.g. 200 ms after attach, so that FHEM has finished its setup) — or a client-side heuristic. This still has to be verified against a real Homegear installation.
 >
-> Byte-Format-Unterschiede zwischen `00_HMUARTLGW.pm` und `Hm-Mod-Rpi-Pcb.cpp` sind klein (gleiche Frame-Struktur, gleiche CRC, beide akzeptieren `[0x00] + "Co_CPU_App"`-Antwort).
+> Byte format differences between `00_HMUARTLGW.pm` and `Hm-Mod-Rpi-Pcb.cpp` are small (same frame structure, same CRC, both accept the `[0x00] + "Co_CPU_App"` answer).
 
 ---
 
-## ConfigRegistry-Schluessel
+## ConfigRegistry keys
 
-Auf der CULFW32-ASCII-Konsole oder via Web-UI / JSON-Frontend:
+On the CULFW32 ASCII console or via the web UI / JSON frontend:
 
-| Key | Type | Beschreibung |
+| Key | Type | Description |
 |---|---|---|
-| `hmu.port` | U16, persist | Listen-Port. Default 2325. Persistiert in EE 0x123 (LE). Aenderung **restartet** den TCP-Listener live. |
-| `hmu.hmid` | Str (read-only) | Aktuelle 3-Byte HMID als 6-Hex (z.B. `F11234`). FHEM setzt sie via `APP_SET_HMID`. |
-| `?build` | Str (read-only) | enthaelt `fe:hmuartlgw` wenn das Frontend mit-kompiliert ist |
-| `?stats` | Tabular | `asksin rx N/M (B)` — RX/TX-Counter pro Protokoll, hilfreich fuer Debug |
+| `hmu.port` | U16, persist | Listen port. Default 2325. Persisted in EE 0x123 (LE). A change **restarts** the TCP listener live. |
+| `hmu.hmid` | Str (read-only) | Current 3-byte HMID as 6 hex digits (e.g. `F11234`). FHEM sets it via `APP_SET_HMID`. |
+| `?build` | Str (read-only) | contains `fe:hmuartlgw` if the frontend is compiled in |
+| `?stats` | Tabular | `asksin rx N/M (B)` — RX/TX counters per protocol, helpful for debugging |
 
 ```
-?hmu.port           # aktuellen Port abfragen
-?hmu.port=2400      # Port setzen, Server bindet sofort um
-?hmu.hmid           # gerade aktive BidCos-Adresse
+?hmu.port           # query the current port
+?hmu.port=2400      # set the port, the server rebinds immediately
+?hmu.hmid           # currently active BidCos address
 ```
 
-Die HMID kann **nicht direkt** auf CULFW32 gesetzt werden — FHEM/Homegear ist die autorisierte Quelle und schreibt sie via `APP_SET_HMID`. Nach Reboot bleibt die letzte gesetzte HMID erhalten.
+The HMID **cannot** be set **directly** on CULFW32 — FHEM/Homegear is the authoritative source and writes it via `APP_SET_HMID`. The last HMID that was set is kept across reboots.
 
 ---
 
-## AES (Phase 4, v1.x+1)
+## AES (phase 4, v1.x+1)
 
-HomeMatic-classic kennt zwei Sicherheitsklassen — und CULFW32 v1 deckt nur die unsignierte ab. Pragmatisch ist das in den allermeisten Hausautomatisierungs-Setups zwar nicht-blockend, aber bei Sicherheitstechnik kritisch.
+HomeMatic classic has two security classes — and CULFW32 v1 covers only the unsigned one. In practice this does not block the vast majority of home automation setups, but it is critical for security equipment.
 
-### AES-Mechanik bei HomeMatic
+### AES mechanism in HomeMatic
 
-Die "secure"-Variante des AskSin-Protokolls ist Challenge-Response auf Frame-Layer:
+The "secure" variant of the AskSin protocol is a challenge-response on the frame layer:
 
-1. CCU sendet ein Steuerkommando an Peer
-2. Peer antwortet mit AES-Challenge (6 Random-Byte)
-3. CCU berechnet AES-128(key, challenge ⊕ original-msg) und sendet Response
-4. Peer prueft AES-Response gegen seinen lokalen Schluessel; bei Match wird das Kommando ausgefuehrt
+1. The CCU sends a control command to the peer
+2. The peer answers with an AES challenge (6 random bytes)
+3. The CCU computes AES-128(key, challenge ⊕ original-msg) and sends the response
+4. The peer checks the AES response against its local key; on a match, the command is executed
 
-Pro Peer-Beziehung wird in der Master-List-0 ein Bit gesetzt, ob AES zwingend erforderlich ist. CCU verwaltet die Schluessel und FHEM uebermittelt sie ans Modul via `APP_SET_CURRENT_KEY` / `APP_SET_PREVIOUS_KEY` / `APP_SET_TEMP_KEY` (17 Byte je: 1 Byte Index + 16 Byte AES-Key).
+For each peer relationship, a bit in master list 0 says whether AES is mandatory. The CCU manages the keys, and FHEM passes them to the module via `APP_SET_CURRENT_KEY` / `APP_SET_PREVIOUS_KEY` / `APP_SET_TEMP_KEY` (17 bytes each: 1-byte index + 16-byte AES key).
 
-CULFW32 v1 ACKt diese Befehle aber **speichert die Schluessel nicht** — Phase 4 (mbedtls/aes auf der C6-HW-AES-Beschleunigung) ist die Folge-Iteration.
+CULFW32 v1 ACKs these commands but **does not store the keys** — phase 4 (mbedtls/aes on the C6 hardware AES accelerator) is the next iteration.
 
-### Welche Geraete brauchen AES?
+### Which devices need AES?
 
-| Geraete-Klasse | AES per Default | Bedeutung ohne AES |
+| Device class | AES by default | Meaning without AES |
 |---|---|---|
-| **HM-Sec-** (Sicherheits-Linie) — `HM-Sec-SC-2`, `HM-Sec-MD`, `HM-Sec-Key`, `HM-Sec-Win`, `HM-Sec-SD`, `HM-Sec-Sir-WM`, `HM-Sec-RHS` | **Mandatory** | Geraet ACKt Steuerbefehle nicht; FHEM-Reading `state=AES_KO` |
-| **HM-LC-** (Licht/Switch) — `HM-LC-Sw*-Pl*`, `HM-LC-Dim*`, `HM-LC-Bl*` | **Optional** (off) | Voll funktional |
-| **HM-PB-** / **HM-RC-** (Wand-/Fern-Taster) | **Optional** (off) | Voll funktional |
-| **HM-CC-** (Heizungs-Thermostate) — `HM-CC-RT-DN`, `HM-CC-TC` | **Optional** (off) | Voll funktional |
-| **HM-WDS-** (Wetter-Sensoren) | **Optional** (off) | Voll funktional |
-| **HM-Dis-** / **HM-LGW-** (Display/Gateway) | gemischt | meist optional |
-| **HmIP** (HomeMatic IP — neuer Protokoll-Stack) | **Mandatory** auf L1 (CCM) | komplett anderer Stack — kein klassisches HMUARTLGW-AES, eigene Komponente erforderlich |
+| **HM-Sec-** (security line) — `HM-Sec-SC-2`, `HM-Sec-MD`, `HM-Sec-Key`, `HM-Sec-Win`, `HM-Sec-SD`, `HM-Sec-Sir-WM`, `HM-Sec-RHS` | **Mandatory** | the device does not ACK control commands; FHEM reading `state=AES_KO` |
+| **HM-LC-** (light/switch) — `HM-LC-Sw*-Pl*`, `HM-LC-Dim*`, `HM-LC-Bl*` | **Optional** (off) | fully functional |
+| **HM-PB-** / **HM-RC-** (wall/remote push buttons) | **Optional** (off) | fully functional |
+| **HM-CC-** (heating thermostats) — `HM-CC-RT-DN`, `HM-CC-TC` | **Optional** (off) | fully functional |
+| **HM-WDS-** (weather sensors) | **Optional** (off) | fully functional |
+| **HM-Dis-** / **HM-LGW-** (display/gateway) | mixed | mostly optional |
+| **HmIP** (HomeMatic IP — new protocol stack) | **Mandatory** on L1 (CCM) | completely different stack — no classic HMUARTLGW AES, a separate component is required |
 
-CULFW32 v1 ohne AES bedient damit die **ueberwiegende Mehrheit** der HomeMatic-classic-Heimautomations-Geraete. HM-Sec-Geraete und HmIP-only-Setups brauchen Phase 4+.
+CULFW32 v1 without AES therefore serves the **vast majority** of HomeMatic classic home automation devices. HM-Sec devices and HmIP-only setups need phase 4+.
 
-### Was FHEM macht ohne IODev-AES
+### What FHEM does without IODev AES
 
-FHEM `00_HMUARTLGW.pm` toleriert AES-KO **per-Peer**: bei einem AES-required Geraet zeigt `cond=ok` weiter, das einzelne Geraet bekommt aber `state=AES_KO`. Der Rest des Setups laeuft normal weiter — kein crash, kein global lockout.
+FHEM `00_HMUARTLGW.pm` tolerates AES-KO **per peer**: with a device that requires AES, `cond=ok` is still shown, but that single device gets `state=AES_KO`. The rest of the setup keeps running normally — no crash, no global lockout.
 
 ---
 
 ## Troubleshooting
 
-### `cond=disconnected` bleibt nach `define`
+### `cond=disconnected` remains after `define`
 
-- Erreichbarkeit pruefen: `ping <culfw32-ip>` und `nc -zv <culfw32-ip> 2325` vom FHEM-Host aus
-- Firewall? CULFW32 hoert auf `0.0.0.0:2325`, FHEM-Host muss raus duerfen
-- `attr myhm verbose 5` und `tail -f fhem.log` — erste Zeile sollte `myhm device opened` sein
-- CULFW32 selbst pruefen: `?hmu.port` (sollte `2325` zeigen), `?wifi.state` (sollte `connected`)
+- Check reachability: `ping <culfw32-ip>` and `nc -zv <culfw32-ip> 2325` from the FHEM host
+- Firewall? CULFW32 listens on `0.0.0.0:2325`; the FHEM host must be allowed to connect out
+- `attr myhm verbose 5` and `tail -f fhem.log` — the first line should be `myhm device opened`
+- Check CULFW32 itself: `?hmu.port` (should show `2325`), `?wifi.state` (should be `connected`)
 
 ### `cond=ERROR-Overload`
 
-CULFW32 antwortet auf `OS_GET_CREDITS` mit Load > 100% (= byte > 0x64). Sollte nicht auftreten — Bug-Report:
-- `?stats` auf der ASCII-Konsole holen
-- FHEM-Verbose-Log mit `read raw`-Zeilen
-- Bug-Report an `tostmann@gmail.com` mit beidem
+CULFW32 answers `OS_GET_CREDITS` with a load > 100% (= byte > 0x64). This should not happen — bug report:
+- Get `?stats` on the ASCII console
+- FHEM verbose log with `read raw` lines
+- Bug report to `tostmann@gmail.com` with both
 
-### `cond=ok`, aber `Initialized` bleibt 0
+### `cond=ok`, but `Initialized` stays 0
 
-Init haengt mitten drin. FHEM-Verbose-Log mit `state ` durchsehen — der hoechste erreichte State zeigt wo's klemmt:
-- `state 1` (QUERY_APP) haengt → unsolicited Push wird nicht akzeptiert; Re-Probe via `set myhm reopen`
-- `state 7-9` (SET_TIME, GET_FIRMWARE, GET_SERIAL) haengt → Bug in CULFW32-Antwortformat
-- `state 14-16` (SET_*_KEY) → AES-Keys werden geladen; bei CULFW32 plain-ACKed (kein Bug)
+Init hangs halfway. Look through the FHEM verbose log for `state ` — the highest state reached shows where it is stuck:
+- `state 1` (QUERY_APP) hangs → the unsolicited push is not accepted; re-probe via `set myhm reopen`
+- `state 7-9` (SET_TIME, GET_FIRMWARE, GET_SERIAL) hangs → bug in the CULFW32 answer format
+- `state 14-16` (SET_*_KEY) → AES keys are being loaded; plain-ACKed by CULFW32 (not a bug)
 
-### Geraet pairt aber `STATE=MISSING ACK` / `RESPONSE TIMEOUT`
+### Device pairs, but `STATE=MISSING ACK` / `RESPONSE TIMEOUT`
 
-Das CULFW32-Test-Board hat **~14 dB schwaechere RX-Sensitivitaet** als ein gut-angepasster CUL868 (BALUN-loser Stub am C6-Mini-Board). Bei battery-powered HM-PB-2-WM/HM-RC-* mit kurzem Listening-Window: Pair-Antwort kommt nicht rechtzeitig.
+The CULFW32 test board has **~14 dB weaker RX sensitivity** than a well-matched CUL868 (stub without BALUN on the C6 mini board). With battery-powered HM-PB-2-WM/HM-RC-* that have a short listening window, the pairing answer does not arrive in time.
 
 Workarounds:
-- Geraet **physisch naeher** an CULFW32 bringen (10-30 cm)
-- Pair mehrmals retriggern (`set myhm hmPairForSec 300`, dann Pair-Knopf-Druck)
-- Bei mains-powered HM-LC-* funktioniert es zuverlaessig auch auf 2 m
-- Hardware-Spin (CULFW32-PCB mit ordentlichem BALUN + Antennenanpassung) loest's grundsaetzlich
+- Move the device **physically closer** to CULFW32 (10-30 cm)
+- Retrigger pairing several times (`set myhm hmPairForSec 300`, then press the pair button)
+- With mains-powered HM-LC-* it works reliably even at 2 m
+- A hardware spin (CULFW32-PCB with a proper BALUN + antenna matching) solves it fundamentally
 
-### Frames erscheinen nicht in FHEM, aber CUL868-Sniffer sieht sie
+### Frames do not appear in FHEM, but the CUL868 sniffer sees them
 
-Selbe Diagnose: RX-Sensitivitaet. CUL868 hoert mit, CULFW32 liegt unter dem Empfindlichkeits-Floor an dem Standort. Geraet naeher ranbringen oder Hardware-Spin abwarten.
+Same diagnosis: RX sensitivity. The CUL868 hears them, CULFW32 is below its sensitivity floor at that location. Move the device closer or wait for the hardware spin.
 
 ---
 
-## Verifikations-Werkzeuge
+## Verification tools
 
-### Test-Tools im Repo
+### Test tools in the repo
 
-`firmware/test/hmuartlgw/`:
-- `frame_parser.py` — Frame-Wrapper als Python-Reference (CRC, Escape, Encode/Decode). Roundtrip-test passed.
-- `trace_listener.py --mode silent|stub-ack` — TCP-Stub-Server, der die FHEM-Init-Sequenz byte-genau beantwortet **ohne** echte CULFW32-Hardware. Gut fuer FHEM-Setup-Test.
-- `traces/init_sequence_REFERENCE.log` — der byte-genaue 14-Schritt-Trace einer FHEM-init gegen den Stub.
-- FHEM-Referenz `00_HMUARTLGW.pm`: https://svn.fhem.de/trac/browser/trunk/fhem/FHEM/00_HMUARTLGW.pm
+`test/hmuartlgw/`:
+- `frame_parser.py` — frame wrapper as a Python reference (CRC, escape, encode/decode). Round-trip test passed.
+- `trace_listener.py --mode silent|stub-ack` — TCP stub server that answers the FHEM init sequence byte-exact **without** real CULFW32 hardware. Good for testing the FHEM setup.
+- FHEM reference `00_HMUARTLGW.pm`: https://svn.fhem.de/trac/browser/trunk/fhem/FHEM/00_HMUARTLGW.pm
 
-Empfehlung: vor dem Erstanschluss CULFW32-Hardware testen ob der Setup-Pfad ueberhaupt klappt:
+Recommendation: before connecting the CULFW32 hardware for the first time, test whether the setup path works at all:
 ```bash
-# auf dem FHEM-Host:
-cd firmware/test/hmuartlgw
+# on the FHEM host:
+cd test/hmuartlgw
 python3 trace_listener.py --mode stub-ack --port 2325 &
 # in FHEM:
 define teststub HMUARTLGW uart://localhost:2325
-# → sollte sofort cond=ok / Initialized=1 zeigen
+# → should show cond=ok / Initialized=1 immediately
 ```
 
-### Schichten-Verifikations-Status
+### Layer verification status
 
-| Layer | Gegen was byte-genau? | Status |
+| Layer | Byte-exact against what? | Status |
 |---|---|---|
-| ASCII-Frontend `A`/`Z`/`F`/`T`/etc. | `a-culfw clib` (Original) | ✅ verifiziert (Phase 2 Bringup) |
-| AskSin-Funkseite (CC1101 Reg + encrypt/decrypt) | `a-culfw rf_asksin.c` | ✅ verifiziert (3-Wege gegen Lokales+Remote CUL868) |
-| HMUARTLGW-0xfd-Wrapper | FHEM `00_HMUARTLGW.pm`-Erwartung | ✅ verifiziert (14 Init-Schritte byte-genau, real-Pair Steckdose) |
-| HMUARTLGW gegen reales eQ-3-Modul (rfd) | direkter Vergleich gegen HM-MOD-RPI-PCB-Firmware | ⚠ **noch nicht** — Folge-Test wenn HW + RaspberryMatic-Setup im Lab |
-| HMUARTLGW gegen Homegear-HomeMaticBidCoS | `Hm-Mod-Rpi-Pcb.cpp` (Open-Source) | ⚠ **noch nicht** — Folge-Test, plausibel kompatibel |
+| ASCII frontend `A`/`Z`/`F`/`T`/etc. | `a-culfw clib` (original) | ✅ verified (phase 2 bring-up) |
+| AskSin radio side (CC1101 reg + encrypt/decrypt) | `a-culfw rf_asksin.c` | ✅ verified (3-way against local + remote CUL868) |
+| HMUARTLGW 0xfd wrapper | FHEM `00_HMUARTLGW.pm` expectation | ✅ verified (init sequence byte-exact, real pairing of the plug-in switch) |
+| HMUARTLGW against a real eQ-3 module (rfd) | direct comparison against the HM-MOD-RPI-PCB firmware | ⚠ **not yet** — follow-up test once HW + a RaspberryMatic setup are in the lab |
+| HMUARTLGW against Homegear-HomeMaticBidCoS | `Hm-Mod-Rpi-Pcb.cpp` (open source) | ⚠ **not yet** — follow-up test, plausibly compatible |
 
 ---
 
-## Bekannte Einschraenkungen (v1)
+## Known limitations (v1)
 
-- **AES**: storage-only, keine Crypto-Verarbeitung (siehe oben — Phase 4 v1.x+1).
-- **Wandtaster-Pair** auf >1 m mit dem Test-Board marginal — Hardware-Spin (BALUN+ordentliche Antennenanpassung) loest's. Mains-powered Geraete zuverlaessig auch auf 2 m.
-- **Peer-Tabelle** ist nicht persistent — pro FHEM-Reconnect leer. Funktioniert ohne, weil AskSinRF promiscuous laeuft und FHEM-CUL_HM dst-side filtert. Persistenz waere ein nice-to-have fuer schnelleren Reconnect.
-- **HMUARTLGW-LAN-Modus** (HM-CFG-LAN, ASCII-Wrapper, AES-Challenge auf Wire-Layer) ist nicht implementiert und nicht geplant. Wer eine HM-CFG-LAN-kompatible Box braucht: bestehender CUL868 + eigener `socat`-Bridge ist der Pfad.
-- **HmIP-Linie** (HomeMatic-IP) komplett ausserhalb dieses Frontends. HmIP nutzt anderen Wire-Stack mit AES-CCM, eigenen Pair-Daemon (`HmIPServer.jar`, eq-3 closed-source). Kein Plan fuer Phase 5+.
+- **AES**: storage-only, no crypto processing (see above — phase 4, v1.x+1).
+- **Wall push button pairing** at >1 m with the test board is marginal — the hardware spin (BALUN + proper antenna matching) solves this. Mains-powered devices are reliable even at 2 m.
+- **Peer table** is not persistent — empty after each FHEM reconnect. It works without it, because AskSinRF runs promiscuously and FHEM CUL_HM filters on the dst side. Persistence would be a nice-to-have for faster reconnects.
+- **HMUARTLGW LAN mode** (HM-CFG-LAN, ASCII wrapper, AES challenge on the wire layer) is not implemented and not planned. If you need an HM-CFG-LAN-compatible box: an existing CUL868 + your own `socat` bridge is the way.
+- **HmIP line** (HomeMatic IP) is entirely outside this frontend. HmIP uses a different wire stack with AES-CCM and its own pairing daemon (`HmIPServer.jar`, eq-3 closed source). No plan for phase 5+.
 
 ---
 
-## Wire-Protokoll-Quick-Reference
+## Wire protocol quick reference
 
-Vollstaendige Spec siehe Memory `hmuartlgw_protocol_spec.md`. Hier nur die Kernfakten.
+This is not the complete specification; only the core facts.
 
-### Frame-Layout
+### Frame layout
 ```
 0xfd <len_hi> <len_lo> <dst> <cnt> <payload...> <crc_hi> <crc_lo>
                         │      │
-                        │      └─ Counter-Byte. Host-Sends inkrementieren;
-                        │         Modul spiegelt im ACK. Module-Sends
-                        │         (unsolicited APP_RECV) eigener counter.
+                        │      └─ Counter byte. Host sends increment it;
+                        │         the module mirrors it in the ACK. Module sends
+                        │         (unsolicited APP_RECV) use their own counter.
                         └─ 0=OS, 1=APP, (254=DUAL, 255=DUAL_ERR — DualCoPro/HmIP)
-length = dst+cnt+payload bytes (ohne CRC).
-escape = 0xfc und 0xfd im Body werden durch 0xfc + (b ^ 0x80) ersetzt.
-crc16  = poly 0x8005, init 0xd77f. Berechnet ueber [0xfd, len_h, len_l, dst, cnt, payload].
+length = dst+cnt+payload bytes (without CRC).
+escape = 0xfc and 0xfd in the body are replaced by 0xfc + (b ^ 0x80).
+crc16  = poly 0x8005, init 0xd77f. Computed over [0xfd, len_h, len_l, dst, cnt, payload].
 ```
 
-### OS-Layer-Befehle (dst=0)
-| Code | Name | Antwort |
+### OS layer commands (dst=0)
+| Code | Name | Answer |
 |---|---|---|
 | 0x00 | OS_GET_APP | `[0x00] + "Co_CPU_App"` |
 | 0x02 | OS_GET_FIRMWARE | `[0x04, 0x02] + 3-pad + M.m.p` (3-byte version) |
@@ -338,42 +337,42 @@ crc16  = poly 0x8005, init 0xd77f. Berechnet ueber [0xfd, len_h, len_l, dst, cnt
 | 0x0b | OS_GET_SERIAL | `[0x04, 0x02] + 10 ASCII bytes` |
 | 0x0e | OS_SET_TIME | `[0x04, 0x01]` |
 
-### APP-Layer-Befehle (dst=1)
-| Code | Name | Bedeutung |
+### APP layer commands (dst=1)
+| Code | Name | Meaning |
 |---|---|---|
-| 0x00 | APP_SET_HMID | Host setzt 3-byte HMID |
-| 0x01 | APP_GET_HMID | Antwort `[0x04, 0x07] + 3-byte HMID` (ACK_WITH_MULTIPART_DATA) |
-| 0x02 | APP_SEND | TX-Frame: `[02 00 00 mode] + msg_nr + flags + mtype + src(3) + dst(3) + payload` |
-| 0x03 | APP_SET_CURRENT_KEY | 17 byte (1-byte index + 16-byte AES-key) |
-| 0x05 | APP_RECV | RX-Frame (vom Modul ungefragt): `[0x05, status, info, RSSI_raw] + msg_nr + flags + mtype + src + dst + payload` |
-| 0x10 | APP_DEFAULT_HMID | Antwort `[0x04, 0x07] + 3-byte HMID` |
+| 0x00 | APP_SET_HMID | host sets the 3-byte HMID |
+| 0x01 | APP_GET_HMID | answer `[0x04, 0x07] + 3-byte HMID` (ACK_WITH_MULTIPART_DATA) |
+| 0x02 | APP_SEND | TX frame: `[02 00 00 mode] + msg_nr + flags + mtype + src(3) + dst(3) + payload` |
+| 0x03 | APP_SET_CURRENT_KEY | 17 bytes (1-byte index + 16-byte AES key) |
+| 0x05 | APP_RECV | RX frame (unsolicited from the module): `[0x05, status, info, RSSI_raw] + msg_nr + flags + mtype + src + dst + payload` |
+| 0x10 | APP_DEFAULT_HMID | answer `[0x04, 0x07] + 3-byte HMID` |
 
-ACK-Codes: 0x01=OK, 0x02=ACK_INFO, 0x05=ENO_CREDITS (LOVF), 0x06=ECSMACA, 0x07=ACK_WITH_MULTIPART_DATA, 0x0c=AES_OK, 0x0d=AES_KO.
+ACK codes: 0x01=OK, 0x02=ACK_INFO, 0x05=ENO_CREDITS (LOVF), 0x06=ECSMACA, 0x07=ACK_WITH_MULTIPART_DATA, 0x0c=AES_OK, 0x0d=AES_KO.
 
-### Init-Sequenz (FHEM-getriggert nach TCP-Connect)
+### Init sequence (triggered by FHEM after the TCP connect)
 
-1. `OS_GET_APP` → wir antworten `[0x00] + "Co_CPU_App"` (= App ist aktiv)
-2. `APP_GET_HMID` → wir antworten mit HMID aus EE
-3. `APP_DEFAULT_HMID` → wir antworten mit Original-HMID (selbe wie SET-HMID)
+1. `OS_GET_APP` → we answer `[0x00] + "Co_CPU_App"` (= app is active)
+2. `APP_GET_HMID` → we answer with the HMID from EE
+3. `APP_DEFAULT_HMID` → we answer with the original HMID (same as SET-HMID)
 4. `OS_SET_TIME` → ACK
-5. `OS_GET_FIRMWARE` → wir antworten 1.4.1 (nicht-outdated Floor)
+5. `OS_GET_FIRMWARE` → we answer 1.4.1 (non-outdated floor)
 6. `OS_NORMAL_MODE` → ACK
-7. `OS_GET_SERIAL` → wir antworten "CUL<MAC>"
+7. `OS_GET_SERIAL` → we answer "CUL<MAC>"
 8. `OS_ENABLE_CSMACA` → ACK
 9. `OS_ENABLE_CREDITS` → ACK
-10. `OS_GET_CREDITS` → wir antworten 0% (idle)
-11. `APP_SET_CURRENT_KEY` → ACK (Schluessel aktuell unverarbeitet)
+10. `OS_GET_CREDITS` → we answer 0% (idle)
+11. `APP_SET_CURRENT_KEY` → ACK (key currently not processed)
 12. `APP_SET_PREVIOUS_KEY` → ACK
 13. `APP_SET_TEMP_KEY` → ACK
 
-Danach `cond=ok`, `Initialized=1`. Modul ist betriebsbereit.
+After that, `cond=ok`, `Initialized=1`. The module is ready for operation.
 
 ---
 
-## Quellen
+## Sources
 
 - FHEM `00_HMUARTLGW.pm`: https://github.com/mhop/fhem-mirror/blob/master/fhem/FHEM/00_HMUARTLGW.pm
 - Homegear-HomeMaticBidCoS Hm-Mod-Rpi-Pcb.cpp: https://github.com/Homegear/Homegear-HomeMaticBidCoS/blob/master/src/PhysicalInterfaces/Hm-Mod-Rpi-Pcb.cpp
 - eQ-3 OCCU: https://github.com/eq-3/occu
-- alexreinert HB-RF-ETH (TCP-Bridge zum HM-MOD): https://github.com/alexreinert/HB-RF-ETH
-- a-culfw rf_asksin.c (Funk-Layer): https://github.com/tostmann/a-culfw/blob/master/culfw/clib/rf_asksin.c
+- alexreinert HB-RF-ETH (TCP bridge to the HM-MOD): https://github.com/alexreinert/HB-RF-ETH
+- a-culfw rf_asksin.c (radio layer): https://github.com/tostmann/a-culfw/blob/master/culfw/clib/rf_asksin.c

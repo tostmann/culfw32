@@ -21,26 +21,26 @@ Thumbs.db
 *.bak
 *.orig
 
-# Vendored FHEM-Distribution fuer HMUARTLGW-Tests — throwaway, upstream verfuegbar.
-# Nur unsere eigenen Traces sollen committed sein; die FHEM-Referenz liegt upstream
+# Vendored FHEM distribution for HMUARTLGW tests — throwaway, available upstream.
+# Only our own traces are meant to be committed; the FHEM reference lives upstream
 # (https://svn.fhem.de/trac/browser/trunk/fhem/FHEM/00_HMUARTLGW.pm).
 test/hmuartlgw/fhem-data/
 test/hmuartlgw/HMUARTLGW.pm
 
-# Werkzeug-Arbeitsverzeichnisse
+# Tool working directories
 .claude/
 
-# Homegear-Test-Container Daten
+# Homegear test container data
 test/homegear/
 
-# Lokale Trace-/Capture-Dumps (HF-Sniffer, USB-mon, DSLogic)
+# Local trace/capture dumps (RF sniffer, USB-mon, DSLogic)
 *.sr
 *.pcap
 *.pcapng
 firmware/test/hmuartlgw/*.strace.log
 
-# Lokale Arbeitsnotizen, Secrets, Logs, fremde Datenblaetter und Schaltplaene
-# gehoeren nicht ins Repository.
+# Local working notes, secrets, logs, third-party data sheets and schematics
+# do not belong in the repository.
 CLAUDE.md
 MEMORY.md
 GEMINI.md
@@ -56,47 +56,46 @@ datasheets/
 datasheet/
 
 
-# Lokale Mess-/Session-Artefakte (bleiben lokal, siehe Footprint-Regel)
+# Local measurement/session artifacts (stay local)
 test/rmt_idle_2026-08-29/
 test/pa_2026-09-03/
 test/pa_2026-09-07/
 test/protomatrix_2026-10-08/
 
-# Produktfotos, lokal abgelegt — nicht Teil der Firmware-Quellen
+# Product photos, stored locally — not part of the firmware sources
 /pics/
 
-# Freigegebene Auslieferungsartefakte: archiviert, aber NICHT versioniert.
-# ESP-IDF-Builds sind ohne SOURCE_DATE_EPOCH nicht bit-reproduzierbar, deshalb
-# muessen freigegebene Binaries aufbewahrt werden — Uebersetzungsergebnisse
-# gehoeren aber nicht in die Versionsverwaltung (siehe docs/URHEBERSCHAFT.md §8).
-# Das MANIFEST je Release ist die Ausnahme: es traegt Commit, md5 und Freigabe.
+# Released delivery artifacts: archived, but NOT versioned.
+# ESP-IDF builds are not bit-reproducible without SOURCE_DATE_EPOCH, so released
+# binaries have to be kept — but build outputs do not belong in version control.
+# The MANIFEST per release is the exception: it records commit, md5 and approval.
 releases/**
 !releases/**/
 !releases/**/MANIFEST.md
 
-# Session-Artefakte
+# Session artifacts
 *.pid
 
-# Uebersetzungsergebnisse gehoeren nicht in die Versionsverwaltung — auch
-# Host-Testbinaries unter components/*/test/ nicht.
+# Build outputs do not belong in version control — this includes
+# host test binaries under components/*/test/.
 firmware/components/*/test/test_*
 !firmware/components/*/test/test_*.c
 !firmware/components/*/test/test_*.cpp
 !firmware/components/*/test/test_*.h
 !firmware/components/*/test/test_*.hpp
 
-# Mess- und Session-Artefakte einzelner Untersuchungen. Verzeichnis als Ganzes
-# ignorieren und bei Bedarf per '!' freigeben (Footprint-Regel) - der
-# Pre-Build-Hook macht sonst 'git add -A' und sammelt sie wieder ein.
+# Measurement and session artifacts of individual investigations. Ignore the
+# directory as a whole and re-include with '!' when needed - the
+# pre-build hook otherwise runs 'git add -A' and collects them again.
 test/freq_2026-08-22/
 
-# AVR-Build-Artefakte (avr/dudette2) — aus den Quellen mit `make` reproduzierbar
+# AVR build artifacts (avr/dudette2) — reproducible from the sources with `make`
 avr/**/*.elf
 avr/**/*.hex
 avr/**/*.map
 
-# Tagesplaene/Session-Artefakte mit Lab-Bezug bleiben lokal
+# Day plans/session artifacts with lab context stay local
 notes/dudette_v2_plan_*.md
 
-# Deploy-Ziele (Lab-Hosts) — nie ins Repo
+# Deploy targets — never into the repo
 firmware/tools/deploy.conf

@@ -1,71 +1,71 @@
 # CULFW32
 
-**ESP32-C6 + CC1101 — der Produktnachfolger der `busware`-CUL-Familie.**
+**ESP32-C6 + CC1101 — the product successor of the `busware` CUL family.**
 
-Volles `culfw`-Funktionsspektrum auf modernem Frontend: WiFi, Matter/Thread-fähiger SoC, USB-C, Web-UI, OTA, Multi-Frontend (FHEM/Homegear/debmatic/SIGNALduino-kompatibel).
+The full `culfw` feature set on a modern frontend: WiFi, a Matter/Thread-capable SoC, USB-C, web UI, OTA, multiple frontends (FHEM/Homegear/debmatic/SIGNALduino-compatible).
 
-> Status: läuft auf Hardware (ESP32-C6 Devboard + CC1101 868 MHz). v1-Funktionsumfang DONE — siehe Feature-Matrix unten. Erste Hardware-Spin (`CULFW32-PCB`) parallel in Vorbereitung.
+> Status: runs on hardware (ESP32-C6 devboard + CC1101 868 MHz). v1 feature set DONE — see the feature matrix below. The first hardware spin (`CULFW32-PCB`) is being prepared in parallel.
 
 ---
 
-## Was kann es?
+## What does it do?
 
-Sub-GHz-Funk-Gateway für Smart-Home-Stacks wie FHEM, Homegear, debmatic, RaspberryMatic, Home-Assistant. CULFW32 spricht die Funk-Protokolle der `busware`-CUL-Familie und exponiert dieselben Daten gleichzeitig auf mehreren Wegen: USB-CDC, TCP-ASCII (FHEM/`socat`), TCP-JSON (Web-UI/HASS), HMUARTLGW (FHEM-`uart://` + debmatic per `hb-rf-eth`), Web-UI im Browser.
+Sub-GHz radio gateway for smart-home stacks such as FHEM, Homegear, debmatic, RaspberryMatic, Home Assistant. CULFW32 speaks the radio protocols of the `busware` CUL family and exposes the same data on several paths at the same time: USB-CDC, TCP ASCII (FHEM/`socat`), TCP JSON (web UI/HASS), HMUARTLGW (FHEM `uart://` + debmatic via `hb-rf-eth`), web UI in the browser.
 
-### Funk-Protokolle (alle 868 MHz / CC1101)
+### Radio protocols (all 868 MHz / CC1101)
 
-| Cmd | Protokoll | Status |
+| Cmd | Protocol | Status |
 |---|---|---|
 | `A` | AskSin (HomeMatic / BidCos) — RX/TX, Crypt, CCA, BURST | DONE |
 | `Z` | Moritz (eq-3 MAX!) — RX/TX, AutoAck | DONE |
-| `F K M T` | SlowRF (FS20 / KS300 / HMS / FHT / EM, OOK) | DONE — FHT-Sub-Features partiell |
+| `F K M T` | SlowRF (FS20 / KS300 / HMS / FHT / EM, OOK) | DONE — FHT sub-features partial |
 | `N` | rf_native (IT+ / PCA301) | DONE |
-| `f` | fastrf (CC1101-P2P 250 kbps GFSK) | DONE |
-| `b` | wMBus T1 / S1 (Wireless M-Bus) | DONE — Real-RF Cross-Check pre-release |
-| signalduino | SIGNALduino-kompatibles Frontend (TCP 2326) | DONE |
+| `f` | fastrf (CC1101 P2P 250 kbps GFSK) | DONE |
+| `b` | wMBus T1 / S1 (Wireless M-Bus) | DONE — transmit verified on air against a-culfw |
+| signalduino | SIGNALduino-compatible frontend (TCP 2326) | DONE |
 
-> 433-MHz-OOK-Familie (`i k Y L h G`) ist auf v1 ausgeschlossen — die aktuelle Antennenanpassung ist 868 MHz; eine 433-MHz-SKU ist Follow-on.
+> The 433 MHz OOK family (`i k Y L h G`) is excluded from v1 — the current antenna matching is for 868 MHz; a 433 MHz SKU is a follow-on.
 
 ### Frontends
 
-| Pfad | Port / Transport | Use-Case |
+| Path | Port / transport | Use case |
 |---|---|---|
-| ASCII (`culfw`) | USB-CDC, UART, TCP `2323` | FHEM `CUL`-Modul, `socat`, manuelle Nutzung |
-| JSON | TCP `2324`, WebSocket `/ws/json` | Web-UI, Home-Assistant, eigene Tools |
-| Web-UI | HTTP `80` | Konfiguration & Live-Terminal im Browser |
-| HMUARTLGW (FHEM) | TCP `2325` | FHEM `HMUARTLGW`-Modul mit `uart://`-Prefix |
+| ASCII (`culfw`) | USB-CDC, UART, TCP `2323` | FHEM `CUL` module, `socat`, manual use |
+| JSON | TCP `2324`, WebSocket `/ws/json` | web UI, Home Assistant, your own tools |
+| Web UI | HTTP `80` | configuration & live terminal in the browser |
+| HMUARTLGW (FHEM) | TCP `2325` | FHEM `HMUARTLGW` module with `uart://` prefix |
 | HMUARTLGW (DualCoPro) | TCP `2327` + UDP `3008` | debmatic / RaspberryMatic via `hb-rf-eth` |
-| SIGNALduino | TCP `2326` | FHEM `SIGNALduino`-Modul |
-| Improv-Serial | USB-CDC | erstmaliges WiFi-Provisioning via Browser (install.busware.de) |
+| SIGNALduino | TCP `2326` | FHEM `SIGNALduino` module |
+| Improv-Serial | USB-CDC | first-time WiFi provisioning via the browser (install.busware.de) |
 
-Mehrere Frontends laufen **gleichzeitig** auf demselben Stick — z.B. FHEM auf 2323, debmatic auf 2327, Browser auf 80.
+Several frontends run **at the same time** on the same stick — e.g. FHEM on 2323, debmatic on 2327, a browser on 80.
 
-### Hardware-Features
+### Hardware features
 
-- **ESP32-C6**: WiFi-6 (2.4 GHz), Bluetooth-LE, Matter / Thread / Zigbee-fähig (Funk-Stacks für späteren Ausbau)
-- **CC1101**: 868 MHz Sub-GHz-Transceiver, FSK + OOK
-- **USB-C**: Power, Konsole (USB-Serial-JTAG), parallel UART0 auf SBU-Pads
-- **Flash 4 MB**: dual OTA-Slots (1.75 MB ota_0 + 1.75 MB ota_1) + 384 KB SPIFFS
-- **OTA-Update**: drahtlos via Web-UI oder JSON-Frontend
+- **ESP32-C6**: WiFi 6 (2.4 GHz), Bluetooth LE, Matter / Thread / Zigbee-capable (radio stacks for later extension)
+- **CC1101**: 868 MHz sub-GHz transceiver, FSK + OOK
+- **USB-C**: power, console (USB-Serial-JTAG), UART0 in parallel on the SBU pads
+- **Flash 4 MB**: dual OTA slots (1.75 MB ota_0 + 1.75 MB ota_1) + 384 KB SPIFFS
+- **OTA update**: wireless via the web UI or the JSON frontend
 
 ---
 
 ## Build
 
-Gebaut und geprüft mit **ESP-IDF 5.5.3**.
+Built and tested with **ESP-IDF 5.5.3**.
 
 ```bash
 . $IDF_PATH/export.sh            # ESP-IDF 5.5.3
 cd firmware/
-idf.py build                     # Ziel und Konfiguration aus sdkconfig.defaults
+idf.py build                     # target and configuration from sdkconfig.defaults
 idf.py -p <PORT> flash monitor
 ```
 
-`firmware/sdkconfig.defaults` enthält die vollständige Konfiguration der ausgelieferten Firmware. Ein Build daraus ergibt dasselbe Image wie die veröffentlichte Version, bis auf das Kompilierdatum in der `V`-Zeile. Beim ersten Build lädt der Espressif-Component-Manager `improv-wifi-busware` (auf einen Commit gepinnt, `firmware/main/idf_component.yml`) und `espressif/mdns` (Stand in `firmware/dependencies.lock`). Wie man gegen eine lokale Kopie von `improv-wifi-busware` baut, steht als Kommentar in `firmware/main/idf_component.yml`.
+`firmware/sdkconfig.defaults` contains the complete configuration of the shipped firmware. A build from it produces the same image as the published version, except for the compile date in the `V` line. On the first build, the Espressif Component Manager downloads `improv-wifi-busware` (pinned to a commit, `firmware/main/idf_component.yml`) and `espressif/mdns` (version recorded in `firmware/dependencies.lock`). How to build against a local copy of `improv-wifi-busware` is described in a comment in `firmware/main/idf_component.yml`.
 
-### Factory-Image
+### Factory image
 
-So entsteht das Image, das der Web-Flasher auf install.busware.de ab Adresse 0 schreibt (an 0.1.912 byte-genau nachgeprüft):
+This is how the image is made that the web flasher on install.busware.de writes from address 0 (verified byte-exact against 0.1.912):
 
 ```bash
 cd firmware/build
@@ -75,94 +75,94 @@ python -m esptool --chip esp32c6 merge_bin -o culfw32.factory.bin \
   0x10000 ota_data_initial.bin 0x20000 culfw32.bin
 ```
 
-Das Online-Update lädt nur das App-Image `culfw32.bin`.
+The online update downloads only the app image `culfw32.bin`.
 
-### Build-Toggles
+### Build toggles
 
-In `idf.py menuconfig` → "CULFW32 Configuration" lassen sich einzelne Funk-Klassen (AskSin / Moritz / SlowRF / Native / FastRF / wMBus) und Frontends (HMUARTLGW / SIGNALduino / JSON / Web-UI) einzeln abschalten. Linker-GC entfernt nicht-instantiierte Klassen aus dem Image. Zur Laufzeit listet `?build` die aktiven Module.
+In `idf.py menuconfig` → "CULFW32 Configuration", individual radio classes (AskSin / Moritz / SlowRF / Native / FastRF / wMBus) and frontends (HMUARTLGW / SIGNALduino / JSON / Web-UI) can be switched off one by one. Linker GC removes classes that are not instantiated from the image. At runtime, `?build` lists the active modules.
 
-### Versionierung
+### Versioning
 
-`firmware/version.txt` und `firmware/build_number.txt` ergeben die Version in der `V`-Zeile und im App-Header (`esp_app_desc_t::version`), den das Online-Update auswertet. Veröffentlicht werden Release-Stände mit dem Tag `v<Version>`, zum Beispiel `v0.2.0`; der Link „Source“ in der Web-UI zeigt auf genau diesen Tag.
-
----
-
-## Erstinbetriebnahme
-
-1. **Flash & Boot.** USB-C anschließen, `idf.py flash monitor`.
-2. **WiFi-Provisioning** — drei Wege:
-   - **Improv-Serial**: Browser auf `install.busware.de` öffnen (Web-Serial-API), CULFW32 wählen, SSID/PSK eingeben.
-   - **AP-Fallback**: `?wifi.mode=2` setzt CULFW32 in AP-Mode (`CULFW32-XXXX` SSID), dann via Web-UI Credentials setzen.
-   - **ASCII**: über USB-CDC `EWs<SSID>` und `EWp<password>`.
-3. **Web-UI** öffnen: `http://<culfw32-ip>` zeigt Config-Tab + Live-Terminal.
-4. Optional: FHEM/debmatic anbinden — siehe `docs/HmuartlgwHowTo.md` und `docs/DebmaticHowTo.md`.
+`firmware/version.txt` and `firmware/build_number.txt` make up the version in the `V` line and in the app header (`esp_app_desc_t::version`), which the online update evaluates. Releases are published with the tag `v<Version>`, for example `v0.2.0`; the "Source" link in the web UI points to exactly this tag.
 
 ---
 
-## Dokumentation
+## First setup
 
-| Datei | Inhalt |
+1. **Flash & boot.** Connect USB-C, `idf.py flash monitor`.
+2. **WiFi provisioning** — three ways:
+   - **Improv-Serial**: open `install.busware.de` in the browser (Web Serial API), select CULFW32, enter SSID/PSK.
+   - **AP fallback**: `?wifi.mode=2` puts CULFW32 into AP mode (SSID = host name, `culfw32-xxxxxx`), then set the credentials via the web UI.
+   - **ASCII**: via USB-CDC `EWs<SSID>` and `EWp<password>`.
+3. Open the **web UI**: `http://<culfw32-ip>` shows the config tab + live terminal.
+4. Optional: connect FHEM/debmatic — see `docs/HmuartlgwHowTo.md` and `docs/DebmaticHowTo.md`.
+
+---
+
+## Documentation
+
+| File | Content |
 |---|---|
-| [docs/NetworkHowTo.md](docs/NetworkHowTo.md) | WiFi-Setup, TCP-Server, Allowlist, EW-Befehle |
-| [docs/HmuartlgwHowTo.md](docs/HmuartlgwHowTo.md) | FHEM `HMUARTLGW`-Anbindung, HM-Pair-Workflow |
-| [docs/DebmaticHowTo.md](docs/DebmaticHowTo.md) | debmatic / RaspberryMatic über `hb-rf-eth`-Tunnel |
+| [docs/NetworkHowTo.md](docs/NetworkHowTo.md) | WiFi setup, TCP server, allowlist, EW commands |
+| [docs/HmuartlgwHowTo.md](docs/HmuartlgwHowTo.md) | FHEM `HMUARTLGW` connection, HM pairing workflow |
+| [docs/DebmaticHowTo.md](docs/DebmaticHowTo.md) | debmatic / RaspberryMatic via the `hb-rf-eth` tunnel |
 
-Test-Skripte unter `firmware/tools/` decken die Protokoll-Klassen byte-genau gegen ein Lokales/Remote `busware`-CUL868 ab. Konfiguration über Environment-Variablen — siehe `firmware/tools/_lab_env.py`.
+Test scripts in `firmware/tools/` cover the protocol classes byte-exact against a local/remote `busware` CUL868. Configuration via environment variables — see `firmware/tools/_lab_env.py`.
 
 ---
 
-## Architektur (Kurz-Überblick)
+## Architecture (short overview)
 
-5-Schichten, alle in `firmware/components/`:
+Five layers, all in `firmware/components/`:
 
 ```
 Transport        usbcdc / uart / tcpserver / websocket / hbrfeth_udp
    ↓
 Frontend         culfw (ASCII) / json / web_server / hmuartlgw / signalduino
    ↓
-Renderer         protokoll-spezifische ASCII/JSON-Formatter
+Renderer         protocol-specific ASCII/JSON formatters
    ↓
-RF-Klasse        rf_proto_asksin / moritz / slowrf / native / fastrf / wmbus / signalduino
+RF class         rf_proto_asksin / moritz / slowrf / native / fastrf / wmbus / signalduino
    ↓
-CC1101-Driver    cc1101_driver + rf_manager (Slot-Routing)
+CC1101 driver    cc1101_driver + rf_manager (slot routing)
 ```
 
-Multi-Frontend-Coexistenz: mehrere Frontends abonnieren dieselbe RF-Klasse über den `rf_manager`. Senden serialisiert über `cc1101_slot`; alle Frontends sehen RX-Frames simultan.
+Multi-frontend coexistence: several frontends subscribe to the same RF class through the `rf_manager`. Transmission is serialized through `cc1101_slot`; all frontends see RX frames simultaneously.
 
 ---
 
-## Verwandte Projekte
+## Related projects
 
-CULFW32 ist Teil einer Familie:
+CULFW32 is part of a family:
 
-- **[`a-culfw`](https://github.com/tostmann/a-culfw)** — die original AVR/STM32-`culfw`-Codebase, deren Protokoll-Kerne wir vendoren und auf ESP-IDF/FreeRTOS portieren.
-- **[`improv-wifi-busware`](https://github.com/tostmann/improv-wifi-busware)** — Improv-Serial-Implementierung für `install.busware.de`-Pfad.
+- **[`a-culfw`](https://github.com/tostmann/a-culfw)** — the original AVR/STM32 `culfw` code base whose protocol cores we vendor and port to ESP-IDF/FreeRTOS.
+- **[`improv-wifi-busware`](https://github.com/tostmann/improv-wifi-busware)** — Improv-Serial implementation for the `install.busware.de` path.
 
 ---
 
-## Lizenz
+## License
 
 Copyright © 2026 Dirk Tostmann <tostmann@gmail.com>
 
-CULFW32 steht unter der **GNU General Public License, Version 3 oder (nach Wahl) jede spätere Version** (`GPL-3.0-or-later`). Volltext: [COPYING](COPYING).
+CULFW32 is licensed under the **GNU General Public License, version 3 or (at your option) any later version** (`GPL-3.0-or-later`). Full text: [COPYING](COPYING).
 
-Einige Dateien enthalten Code aus anderen GPL-Projekten (a-culfw, SIGNALduino). Ihre Herkunfts- und Lizenzvermerke stehen im jeweiligen Dateikopf und in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Wegen des SIGNALduino-Anteils und der Apache-2.0-Komponenten von ESP-IDF steht das Gesamtwerk unter Version 3 (oder später), nicht unter Version 2.
+Some files contain code from other GPL projects (a-culfw, SIGNALduino). Their origin and license notices are in the header of each file and in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Because of the SIGNALduino part and the Apache-2.0 components of ESP-IDF, the work as a whole is licensed under version 3 (or later), not under version 2.
 
-Die Frontends für HMUARTLGW und HB-RF-ETH sind eigenständige Implementierungen der jeweiligen Wire-Protokolle, erstellt nach FHEMs `00_HMUARTLGW.pm`, den piVCCU-Quellen und eigenen Mitschnitten. Übernommen sind Protokollfakten (Opcodes, Rahmenformat, CRC-Parameter).
+The frontends for HMUARTLGW and HB-RF-ETH are independent implementations of the respective wire protocols, written from FHEM's `00_HMUARTLGW.pm`, the piVCCU sources and our own captures. What was taken over are protocol facts (opcodes, frame format, CRC parameters).
 
-Beiträge: siehe [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-### Credits & Drittlizenzen
+### Credits & third-party licenses
 
-| Komponente | Lizenz | Verwendung |
+| Component | License | Use |
 |---|---|---|
-| [`a-culfw`](https://github.com/tostmann/a-culfw) (R. Koenig, B. Hempel, D. Tostmann u. a.) | GPL-2.0-or-later | SlowRF-Pulsdecoder, CC1101-Registertabellen, Protokollabläufe und Befehlsformate (Details in den Dateiköpfen) |
-| [SIGNALduino](https://github.com/RFD-FHEM/SIGNALDuino) (N. Butzek, S. Butzek, HomeAutoUser u. a.) | GPL-3.0-or-later | SIGNALduino-Decoder und Sendepfad |
-| [FHEM `00_HMUARTLGW.pm`](https://svn.fhem.de/trac/browser/trunk/fhem/FHEM/00_HMUARTLGW.pm), piVCCU (A. Reinert) | GPL-2.0 / GPL-2.0-or-later | Protokollreferenz für HMUARTLGW und HB-RF-ETH |
-| [Espressif ESP-IDF](https://github.com/espressif/esp-idf) mit FreeRTOS, lwIP, Mbed TLS, cJSON, SPIFFS und den Espressif-Binärbibliotheken | Apache-2.0; Bestandteile MIT, BSD-3-Clause, Apache-2.0 OR GPL-2.0-or-later | Framework, Treiber, Netz- und Funk-Stacks |
-| [`improv-wifi-busware`](https://github.com/tostmann/improv-wifi-busware) (urspr. jnthas) | MIT | Improv-Serial-Provisioning |
-| Abstimmwerte für den CC1101 im wM-Bus-Betrieb (über a-culfw `clib/mbus`, Herkunft Texas Instruments) | Registerwerte | AGC-, Filter-, Kalibrier- und Test-Register in `wmbus_cfg.cpp`; Tabelle neu geschrieben |
+| [`a-culfw`](https://github.com/tostmann/a-culfw) (R. Koenig, B. Hempel, D. Tostmann et al.) | GPL-2.0-or-later | SlowRF pulse decoder, CC1101 register tables, protocol sequences and command formats (details in the file headers) |
+| [SIGNALduino](https://github.com/RFD-FHEM/SIGNALDuino) (N. Butzek, S. Butzek, HomeAutoUser et al.) | GPL-3.0-or-later | SIGNALduino decoder and transmit path |
+| [FHEM `00_HMUARTLGW.pm`](https://svn.fhem.de/trac/browser/trunk/fhem/FHEM/00_HMUARTLGW.pm), piVCCU (A. Reinert) | GPL-2.0 / GPL-2.0-or-later | protocol reference for HMUARTLGW and HB-RF-ETH |
+| [Espressif ESP-IDF](https://github.com/espressif/esp-idf) with FreeRTOS, lwIP, Mbed TLS, cJSON, SPIFFS and the Espressif binary libraries | Apache-2.0; parts MIT, BSD-3-Clause, Apache-2.0 OR GPL-2.0-or-later | framework, drivers, network and radio stacks |
+| [`improv-wifi-busware`](https://github.com/tostmann/improv-wifi-busware) (originally jnthas) | MIT | Improv-Serial provisioning |
+| Tuning values for the CC1101 in wM-Bus operation (via a-culfw `clib/mbus`, Texas Instruments origin) | register values | AGC, filter, calibration and test registers in `wmbus_cfg.cpp`; table rewritten |
 
-### Marken
+### Trademarks
 
-`HomeMatic`, `MAX!`, `BidCoS`, `RaspberryMatic`, `debmatic`, `FHEM`, `Homegear`, `Home Assistant` sind Marken ihrer jeweiligen Eigentümer. CULFW32 ist eine **kompatible** Implementierung — keine Affiliation.
+`HomeMatic`, `MAX!`, `BidCoS`, `RaspberryMatic`, `debmatic`, `FHEM`, `Homegear`, `Home Assistant` are trademarks of their respective owners. CULFW32 is a **compatible** implementation — no affiliation.
