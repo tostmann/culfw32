@@ -257,9 +257,12 @@ void HmuartlgwFrontend::on_rx_data_(std::span<const uint8_t> bytes, Transport* s
     // asksin_send(), also einem on-air-RF-TX (CCA + Sende-Airtime, ~zig ms).
     // Folge: ein zweiter Transport (Zwei-Port-Setup :2325/:2327) blockiert in
     // seinem on_rx_data_ fuer dieses Fenster. Das ist reine Prioritaets-
-    // Inversion / Latenz — KEIN Deadlock (mtx_ ist non-recursive und wird NUR
-    // hier genommen; die RX-Callbacks on_asksin_rx_/on_hmip_rx_ nehmen mtx_ NIE,
-    // also keine Re-Entry, keine Lock-Order-Inversion mit dem SPI-Bus-Mutex).
+    // Inversion / Latenz — KEIN Deadlock. mtx_ ist non-recursive; ausser hier
+    // nimmt ihn nur on_asksin_rx_ kurz fuer den Transport-Snapshot, und der
+    // RX-Task haelt dabei keine RF-Sperre (AskSinRF::drain_fifo gibt die
+    // Chipsperre vor dem Callback frei). Reihenfolge: mtx_ -> Slot -> Chip ->
+    // Bus; der RX-Task nimmt nur Chip -> Bus und betritt Frontend-Code nur
+    // ohne Chipsperre (Review 0202 F2).
     // Sauberer Fix (deferred bis Build-/Regressions-Env wieder steht): in
     // handle_app_send_ die per-Transport-State-Mutation (pt->llmac_tx_cnt_++) +
     // Frame-Bau unter dem Lock erledigen, Lock freigeben, DANN asksin_send()

@@ -132,35 +132,51 @@ void AskSinRF::drain_fifo() {
     // sind, und gibt kein CRC_OK-Signal ohne Rahmen als Geisterrahmen aus
     // (siehe CC1101Driver::read_rx_packet).
     for (int i = 0; i < CC1101Driver::kRxFramesPerDrain; ++i) {
-        // Ein blockierter Callback kann zurueckkehren, waehrend ein anderer Task
-        // sendet (tx() ohne Sperre gegen diesen Task); Lesen, Flushen oder SRX
-        // wuerden die Sendung abbrechen. Nur in RX/IDLE/Overflow weitermachen.
-        if (!drv_->rx_state_safe()) break;
         AskSinFrame frame{};
         uint8_t rssi = 0, lqi = 0;
-        const auto r = drv_->read_rx_packet({frame.data, AskSinFrame::kMaxPayload},
-                                            rssi, lqi, i == 0);
-        if (r == CC1101Driver::RxPacket::Overflow) { drv_->flush_rx(); break; }
-        if (r != CC1101Driver::RxPacket::Frame)    break;   // Empty/Busy/Error; Resync ist geflusht
+        {
+            // Lesen samt Flush (Overflow; Resync und stehendes CRC_OK in
+            // read_rx_packet strobben SIDLE + SFRX) und das SRX danach nur mit
+            // der Chipsperre: ein SIDLE nach dem STX von tx() bricht die Sendung
+            // still ab, der TX-FIFO bliebe gefuellt (Review 0201 F1; bis 0.2.1
+            // liefen diese Pfade ungesperrt). Ohne Sperre sendet gerade jemand;
+            // tx() weckt den Task danach, dann wird gelesen.
+            MtxGuard lk(chip_mtx_, 0);
+            if (!lk.held) break;
+            // Nur in RX/IDLE/Overflow weitermachen: nach einem Moduswechsel
+            // waehrend des Callbacks sendet womoeglich eine andere Klasse, die
+            // diese Sperre nicht kennt.
+            if (!drv_->rx_state_safe()) break;
+            const auto r = drv_->read_rx_packet({frame.data, AskSinFrame::kMaxPayload},
+                                                rssi, lqi, i == 0);
+            if (r == CC1101Driver::RxPacket::Overflow) { drv_->flush_rx(); break; }
+            if (r != CC1101Driver::RxPacket::Frame)    break;   // Empty/Busy/Error; Resync ist geflusht
+
+            // Frequenzoffset-Schaetzung mitnehmen — nur frame-synchron belastbar
+            // (SWRS061I §14.1). Speist `?rf.freqest` / `?rf.freqcal=apply`. Muss VOR
+            // dem SRX unten stehen: der neue RX-Start setzt den Schaetzer zurueck.
+            drv_->sample_freqest();
+
+            // RX sofort wieder scharf schalten, VOR Decrypt und Callback — wie
+            // a-culfw (rf_asksin.c: SRX direkt nach dem FIFO-Lesen). MCSM1 = 0x33
+            // laesst den Chip nach jedem Paket in IDLE; bis 0.1.894 kam das SRX erst
+            // nach dem Callback, und solange der Renderer stand (TCP bis 0.1.901
+            // bis zu 3 s), war der Empfaenger taub — gemessen 13.10.2026: jeder
+            // Rahmen im Stau-Fenster verloren. Jetzt faengt der Chip waehrenddessen
+            // das naechste Paket auf; die Schleife liest es nach dem Callback.
+            // Direkt statt rearm_rx_(): der Mutex ist nicht rekursiv, ein zweites
+            // Take ohne Warten schluege fehl und das SRX fiele aus.
+            if (!enabled_) return;
+            drv_->restart_rx_if_idle();
+        }   // Sperre frei vor dem Callback, der bis in den Transport reicht.
+            // Frontends halten ihren Mutex ueber tx() (Reihenfolge Frontend ->
+            // Slot -> Chip -> Bus); mit der Chipsperre hier stuende der RX-Task
+            // an deren Mutex und tx() an der Chipsperre.
 
         const uint8_t len = frame.data[0];
         frame.len      = len;
         frame.rssi_raw = rssi;
         frame.lqi_raw  = lqi;
-        // Frequenzoffset-Schaetzung mitnehmen — nur frame-synchron belastbar
-        // (SWRS061I §14.1). Speist `?rf.freqest` / `?rf.freqcal=apply`. Muss VOR
-        // dem SRX unten stehen: der neue RX-Start setzt den Schaetzer zurueck.
-        drv_->sample_freqest();
-
-        // RX sofort wieder scharf schalten, VOR Decrypt und Callback — wie
-        // a-culfw (rf_asksin.c: SRX direkt nach dem FIFO-Lesen). MCSM1 = 0x33
-        // laesst den Chip nach jedem Paket in IDLE; bis 0.1.894 kam das SRX erst
-        // nach dem Callback, und solange der Renderer stand (TCP bis 0.1.901
-        // bis zu 3 s), war der Empfaenger taub — gemessen 13.10.2026: jeder
-        // Rahmen im Stau-Fenster verloren. Jetzt faengt der Chip waehrenddessen
-        // das naechste Paket auf; die Schleife liest es nach dem Callback.
-        if (!enabled_) return;
-        rearm_rx_();
 
         // RSSI dBm (CC1101 §17.3 / a-culfw cc1100.c).
         int8_t rs = static_cast<int8_t>(rssi);
@@ -198,8 +214,9 @@ void AskSinRF::drain_fifo() {
         //
         // Ein verspaeteter SRX bricht also eine LAUFENDE Sendung ab -- still,
         // mitten im Rahmen, der Nachfolgeklasse wie der eigenen aus einem anderen
-        // Task (tx() laeuft ohne Sperre gegen diesen Task).  Deshalb prueft die
-        // Schleife oben den Zustand, und SRX kommt nur aus IDLE.  (Bis 0.1.848
+        // Task.  Deshalb nimmt die Schleife oben die Chipsperre (gegen die eigene
+        // Klasse) und prueft den Zustand (gegen eine Nachfolgeklasse), und SRX
+        // kommt nur aus IDLE.  (Bis 0.1.848
         // stand hier die unbelegte Annahme, der Strobe sei harmlos.  Er ist es
         // nicht.)
         if (!enabled_) return;
@@ -229,8 +246,9 @@ void AskSinRF::recover_rx_(bool heartbeat) {
     // Heartbeat (a-culfw rf_asksin.c:206ff: RXFIFO_OVERFLOW oder IDLE -> SRX).
     if (ms == MARC_RXFIFO_OVERFLOW) drv_->strobe(SFRX);
     // Liegt ein fertiger Rahmen im FIFO, den keine Flanke gemeldet hat (oder
-    // steht GDO2 noch), liest ihn drain_fifo() -- ausserhalb des Mutex, weil
-    // der Callback bis in den Transport reicht; es schaltet selbst auf RX.
+    // steht GDO2 noch), liest ihn drain_fifo(). Es nimmt die Sperre selbst und
+    // gibt sie vor dem Callback frei, der bis in den Transport reicht; es
+    // schaltet selbst auf RX.
     if (drv_->gdo2_level() || drv_->rx_frame_waiting()) {
         lk.release();
         drain_fifo();
@@ -323,9 +341,21 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
 
     encrypt(msg);
 
-    // Vom ersten STX bis zur Rueckkehr nach RX kein SIDLE/SRX aus dem RX-Task.
-    // Der haelt die Sperre nur fuer wenige SPI-Zugriffe; wird sie trotzdem nicht
-    // frei, lieber ungesperrt senden als die Sendung verwerfen.
+    // Nach der Sendung den RX-Task einmal wecken, und zwar erst NACH der
+    // Freigabe der Sperre (Destruktoren laufen in umgekehrter Reihenfolge, lk
+    // zuerst): hat er waehrend der Sendung einen Rahmen nicht lesen duerfen,
+    // steht GDO2 noch und meldet keine neue Flanke; ohne Anstoss laege der Rahmen
+    // bis zum 1-s-Heartbeat (Review 0201 F1).
+    struct WakeRx {
+        void* h;
+        ~WakeRx() { if (h) xTaskNotifyGive(static_cast<TaskHandle_t>(h)); }
+    } wake{task_handle_};
+
+    // Vom ersten STX bis zur Rueckkehr nach RX kein SIDLE/SFRX/SRX aus dem
+    // RX-Task. Der haelt die Sperre nur kurz (ein Flush bis ~10 ms, ein
+    // stehendes CRC_OK zwei davon, die Nachkalibrierung im Heartbeat bis
+    // ~30 ms); wird sie trotzdem nicht frei, lieber ungesperrt senden als die
+    // Sendung verwerfen.
     MtxGuard lk(chip_mtx_, pdMS_TO_TICKS(100));
     if (!lk.held) ESP_LOGW(TAG, "tx: Chipsperre belegt, sende ungesperrt");
 

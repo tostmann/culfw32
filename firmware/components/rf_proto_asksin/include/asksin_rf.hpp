@@ -98,8 +98,9 @@ private:
     void        rearm_rx_();         // SRX aus IDLE, aber nicht waehrend tx()
     static void IRAM_ATTR gdo2_isr(void* arg);
 
-    // Haelt tx() fuer die ganze Sendung; der RX-Task strobt SIDLE/SRX nur, wenn
-    // er ihn ohne Warten bekommt. Ein SRX nach dem STX beendet die Sendung
+    // Haelt tx() fuer die ganze Sendung; der RX-Task liest, flusht (SIDLE/SFRX)
+    // und strobt SRX nur, wenn er ihn ohne Warten bekommt, und gibt ihn vor dem
+    // Callback frei. Ein SIDLE oder SRX nach dem STX beendet die Sendung
     // (SWRS061I 19.4, S. 52). Angelegt in start(); ohne (bind_for_tx) ungesperrt.
     SemaphoreHandle_t chip_mtx_ = nullptr;
 
