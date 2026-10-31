@@ -743,15 +743,18 @@ esp_err_t SlowRfRF::start(uint8_t slot_id, CC1101Driver& drv) {
     drv.strobe(SIDLE);
     ets_delay_us(100);
 
-    // Bulk-Write mit Verify-Readback + Retry. Auf der bisherigen Hardware
-    // (ESP32-C6 + CC1101 Test-Board) verschlucken sich vereinzelte Register
-    // beim ersten Bulk-Write — vermutlich SPI-Settling kurz nach Reset.
-    // Manuelles Cw<addr> <val> direkt danach funktioniert immer. Daher: Per-Reg
-    // Read-after-Write, bei Mismatch bis 3× retry.
+    // Register 0x00..0x28 wie a-culfw ccInitChip(EE_CC1100_CFG) aus dem
+    // EEPROM; FHEM stellt Frequenz, bWidth, rAmpl und sens per `W` dort ein und
+    // laedt mit X21 neu. Bis 0.2.0 kam hier immer SLOWRF_CFG, `W` wirkte nie
+    // (gemeldet 30.10.2026, bekannt seit 23.08.). SLOWRF_CFG bleibt Rueckfall
+    // ohne EEPROM; seine Werte 0x00..0x28 sind die EEPROM-Defaults.
+    uint8_t regs[kCfgRegs] = {};
     for (size_t i = 0; SLOWRF_CFG[i] != 0xFF && SLOWRF_CFG[i] <= 0x40; i += 2) {
-        uint8_t addr = SLOWRF_CFG[i];
-        uint8_t want = SLOWRF_CFG[i + 1];
-        if (auto e = drv.write_reg(addr, want); e != ESP_OK) {
+        if (SLOWRF_CFG[i] < kCfgRegs) regs[SLOWRF_CFG[i]] = SLOWRF_CFG[i + 1];
+    }
+    if (cfg_provider_) cfg_provider_(std::span<uint8_t, kCfgRegs>(regs));
+    for (uint8_t addr = 0; addr < kCfgRegs; ++addr) {
+        if (auto e = drv.write_reg(addr, regs[addr]); e != ESP_OK) {
             ESP_LOGE(TAG, "write_reg(0x%02x): %s", addr, esp_err_to_name(e));
             return e;
         }
@@ -785,25 +788,26 @@ esp_err_t SlowRfRF::start(uint8_t slot_id, CC1101Driver& drv) {
     // Default 0xC4 statt 0x65 drin. Workaround: kritische Register (FREQ2/1/0,
     // PKTCTRL0, MDMCFG2/4, MCSM0) explizit NACH SCAL nochmal schreiben. Das ist
     // billiger als ein Read-Verify pro Register und deckt den Fail-Modus ab.
-    static constexpr uint8_t REWRITE_REGS[][2] = {
-        {0x0D, 0x21}, {0x0E, 0x65}, {0x0F, 0x6A},   // FREQ
-        {0x08, 0x32},                               // PKTCTRL0 (PKT_FORMAT=3)
-        {0x10, 0x57}, {0x11, 0xC4}, {0x12, 0x30},   // MDMCFG4/3/2 (BW + DRATE + OOK)
-        {0x18, 0x18},                               // MCSM0 (FS_AUTOCAL)
+    // Mit den geladenen Werten, nicht mit Konstanten: bis 0.2.0 standen hier
+    // feste Werte und haetten ein per `W` gesetztes bWidth/Frequenz ueberschrieben.
+    static constexpr uint8_t REWRITE_REGS[] = {
+        0x0D, 0x0E, 0x0F,     // FREQ
+        0x08,                 // PKTCTRL0 (PKT_FORMAT=3)
+        0x10, 0x11, 0x12,     // MDMCFG4/3/2 (BW + DRATE + OOK)
+        0x18,                 // MCSM0 (FS_AUTOCAL)
     };
-    for (auto& rr : REWRITE_REGS) {
-        drv.write_reg(rr[0], rr[1]);
+    for (uint8_t addr : REWRITE_REGS) {
+        drv.write_reg(addr, regs[addr]);
     }
 
     // Final-Verify (nur Diagnose).
-    for (size_t i = 0; SLOWRF_CFG[i] != 0xFF && SLOWRF_CFG[i] <= 0x40; i += 2) {
-        uint8_t addr = SLOWRF_CFG[i];
-        uint8_t want = SLOWRF_CFG[i + 1];
+    for (uint8_t addr = 0; addr < kCfgRegs; ++addr) {
+        const uint8_t want = regs[addr];
         // Diese sind nach SCAL erwartet hardware-spezifisch und nicht user-defined.
         if (addr == 0x23 || addr == 0x24 || addr == 0x25) continue;
-        // Bewusst abweichend von der CFG-Tabelle: 0x3E PATABLE und 0x22 FREND0 kommen
-        // aus dem EEPROM (PaTableProvider), 0x0C FSCTRL0 aus der Frequenzkalibrierung.
-        if (addr == 0x3E || addr == 0x22 || addr == 0x0C) continue;
+        // 0x22 FREND0 kommt mit der PA-Tabelle (PaTableProvider), 0x0C FSCTRL0
+        // aus der Frequenzkalibrierung.
+        if (addr == 0x22 || addr == 0x0C) continue;
         uint8_t got = 0xFF;
         drv.read_reg(addr, got);
         if (got != want) {

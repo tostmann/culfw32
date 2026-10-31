@@ -50,6 +50,11 @@ public:
     // Bei false → caller muss "LOVF\r\n" emit. Lovf-Counter wird hier gebumpt.
     bool try_consume(uint16_t units);
 
+    // Bucht `units` ab, ohne je abzulehnen: reicht der Kredit nicht, steht er
+    // danach auf 0. Fuer Sendungen, die nicht ausfallen duerfen, deren
+    // Funklast `X` aber zeigen soll (AskSin). Kein LOVF.
+    void consume_floor(uint16_t units);
+
     // Refill-Bonus (z.B. FHT 8v rules in a-culfw fht.c:324).
     void grant(uint16_t units);
 

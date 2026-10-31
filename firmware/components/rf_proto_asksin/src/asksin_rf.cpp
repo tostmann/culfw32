@@ -43,11 +43,32 @@ constexpr uint8_t MARC_TXFIFO_UNDERFLOW  = 0x16;
 // a-culfw ASKSIN_WAIT_TICKS_CCA = 188 @ 125 Hz Tick = ~1.504 s.
 constexpr uint32_t CCA_TIMEOUT_MS = 1500;
 
+// Wie oft der RX-Task ohne GDO2-Meldung nachsieht, ob der Chip in IDLE steht.
+// CRC_AUTOFLUSH (PKTCTRL1 0x0C) verwirft ein Paket mit CRC-Fehler, danach folgt
+// MCSM1.RXOFF_MODE = IDLE (SWRS061I 15.3.3, S. 40) -- ohne GDO2-Flanke, denn
+// IOCFG2 = 0x07 meldet nur CRC OK. a-culfw prueft MARCSTATE in jedem
+// Hauptschleifendurchlauf (rf_asksin.c:206). Bis 0.2.0 kam der Chip erst nach
+// 1 s ohne Meldung zurueck nach RX; Rahmen in dieser Zeit fehlten.
+constexpr uint32_t IDLE_POLL_MS = 10;
+constexpr uint32_t HEARTBEAT_MS = 1000;
+
 uint8_t marc_state(CC1101Driver& d) {
     uint8_t v = 0xFF;
     d.read_status(REG_MARC, v);
     return v & 0x1F;
 }
+
+// Mutex-Waechter; ohne Mutex (bind_for_tx) gilt er als gehalten.
+struct MtxGuard {
+    SemaphoreHandle_t m;
+    bool held;
+    MtxGuard(SemaphoreHandle_t mm, TickType_t wait)
+        : m(mm), held(!mm || xSemaphoreTake(mm, wait) == pdTRUE) {}
+    ~MtxGuard() { release(); }
+    void release() { if (m && held) xSemaphoreGive(m); held = false; }
+    MtxGuard(const MtxGuard&) = delete;
+    MtxGuard& operator=(const MtxGuard&) = delete;
+};
 }
 
 // Crypt-Decoder. Byte-genau a-culfw rf_asksin.c:175..185 (RX-Pfad).
@@ -139,7 +160,7 @@ void AskSinRF::drain_fifo() {
         // Rahmen im Stau-Fenster verloren. Jetzt faengt der Chip waehrenddessen
         // das naechste Paket auf; die Schleife liest es nach dem Callback.
         if (!enabled_) return;
-        drv_->restart_rx_if_idle();
+        rearm_rx_();
 
         // RSSI dBm (CC1101 §17.3 / a-culfw cc1100.c).
         int8_t rs = static_cast<int8_t>(rssi);
@@ -187,7 +208,59 @@ void AskSinRF::drain_fifo() {
     // Nach einem Flush (Resync, Overflow, CRC_OK ohne Rahmen) steht der Chip in
     // IDLE und braucht das SRX; nach einem Rahmen steht er schon in RX (oben
     // re-armt) oder sendet fuer einen anderen Task — dann bleibt er unberuehrt.
+    rearm_rx_();
+}
+
+void AskSinRF::rearm_rx_() {
+    // tx() haelt den Mutex vom ersten STX bis zur Rueckkehr nach RX; ein SRX
+    // dazwischen braeche die Sendung ab. Ohne Mutex nichts tun: danach steht
+    // der Chip ohnehin in RX (MCSM1 TXOFF_MODE = RX).
+    MtxGuard lk(chip_mtx_, 0);
+    if (!lk.held) return;
     drv_->restart_rx_if_idle();
+}
+
+void AskSinRF::recover_rx_(bool heartbeat) {
+    MtxGuard lk(chip_mtx_, 0);
+    if (!lk.held) return;                          // tx() laeuft
+    uint8_t ms = marc_state(*drv_);
+    const bool stuck = (ms == MARC_IDLE || ms == MARC_RXFIFO_OVERFLOW);
+    if (!heartbeat && !stuck) return;              // der haeufige Fall: RX laeuft
+    // Heartbeat (a-culfw rf_asksin.c:206ff: RXFIFO_OVERFLOW oder IDLE -> SRX).
+    if (ms == MARC_RXFIFO_OVERFLOW) drv_->strobe(SFRX);
+    // Liegt ein fertiger Rahmen im FIFO, den keine Flanke gemeldet hat (oder
+    // steht GDO2 noch), liest ihn drain_fifo() -- ausserhalb des Mutex, weil
+    // der Callback bis in den Transport reicht; es schaltet selbst auf RX.
+    if (drv_->gdo2_level() || drv_->rx_frame_waiting()) {
+        lk.release();
+        drain_fifo();
+        return;
+    }
+    // Recovery NUR bei IDLE/Overflow — laufende TX/RX/Calibrate nicht
+    // anfassen, sonst killt der Heartbeat eine Moritz-Zs-1s-Preamble-
+    // TX (verifiziert 2026-04-30 Build 0.1.136: CULFW32→CUL868 Zs
+    // verschwand wenn Heartbeat-Timeout in die TX-Phase fiel).
+    ms = marc_state(*drv_);
+    if (ms == MARC_IDLE || ms == MARC_RXFIFO_OVERFLOW) {
+        drv_->strobe(SIDLE); drv_->strobe(SNOP); drv_->strobe(SRX);
+    } else if (heartbeat && ms == CC1101Driver::MARC_RX && !drv_->pll_locked()) {
+        // Der Chip kann in RX stehen OHNE PLL-Lock — dann empfaengt er
+        // STILL nichts: kein Fehlerbit, keine Meldung, nur ausbleibende
+        // Frames. SWRS061I §22.1 p.58 nennt FSCAL1!=0x3F als Lock-Beleg
+        // und verlangt Nachkalibrieren. Was der Check faengt: eine
+        // gescheiterte (Auto-)Kalibrierung beim RX-Eintritt (MCSM0
+        // FS_AUTOCAL=01 kalibriert bei jedem IDLE->RX; genau den Fall
+        // sah tsculfw als "stuck in RX without PLL lock"). Was er NICHT
+        // faengt: Lock-Verlust durch Drift bei stehendem RX — FSCAL1 ist
+        // ein Kalibrier-Ergebnis, kein Live-Detektor. Bewiesen 08-17:
+        // FSCAL1:=0x3F -> Recal <1 s; FREQ2:=0x00 -> pll_fail zaehlt.
+        // Nur im Heartbeat und nur aus RX heraus — laufende TX/
+        // Calibrate-Phasen bleiben unangetastet (Regression 0.1.136).
+        drv_->note_lock_lost();
+        drv_->strobe(SIDLE);
+        drv_->calibrate();
+        drv_->strobe(SRX);
+    }
 }
 
 void AskSinRF::rx_task_loop() {
@@ -201,50 +274,22 @@ void AskSinRF::rx_task_loop() {
     // `if (!task_handle_)` traf zu) und der gdo2_isr Notify in eine tote
     // TaskHandle schickte. Resultat: AskSin RX komplett broken nach jedem
     // Mode-Switch (PulseCapture→AskSin via Ar). Mirror 0.1.102-Pattern.
+    TickType_t last_hb = xTaskGetTickCount();
     while (true) {
-        bool notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000)) > 0;
+        // Deaktiviert nur im Sekundentakt aufwachen; start() weckt per Notify.
+        const uint32_t wait_ms = enabled_ ? IDLE_POLL_MS : HEARTBEAT_MS;
+        bool notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms)) > 0;
         if (!enabled_) continue;                         // deaktiviert — idle wait
-        if (!notified) {
-            // Heartbeat (a-culfw rf_asksin.c:206ff: RXFIFO_OVERFLOW oder
-            // IDLE -> SRX). Zusaetzlich GDO2-Level pollen falls Edge-IRQ
-            // verpasst wurde (a-culfw rf_asksin.c:147 macht es genauso).
-            uint8_t ms = marc_state(*drv_);
-            if (ms == MARC_RXFIFO_OVERFLOW) drv_->strobe(SFRX);
-            // Auch ohne GDO2: liegt ein fertiger Rahmen im FIFO, den keine
-            // Flanke gemeldet hat, holt ihn spaetestens der Heartbeat.
-            // drain_fifo() fasst den Chip nur in IDLE/RX/RX_END/RX_RST/Overflow
-            // an (rx_state_safe).
-            if (drv_->gdo2_level() || drv_->rx_frame_waiting()) {
-                drain_fifo();
-            }
-            // Recovery NUR bei IDLE/Overflow — laufende TX/RX/Calibrate nicht
-            // anfassen, sonst killt der Heartbeat eine Moritz-Zs-1s-Preamble-
-            // TX (verifiziert 2026-04-30 Build 0.1.136: CULFW32→CUL868 Zs
-            // verschwand wenn Heartbeat-Timeout in die TX-Phase fiel).
-            ms = marc_state(*drv_);
-            if (ms == MARC_IDLE || ms == MARC_RXFIFO_OVERFLOW) {
-                drv_->strobe(SIDLE); drv_->strobe(SNOP); drv_->strobe(SRX);
-            } else if (ms == CC1101Driver::MARC_RX && !drv_->pll_locked()) {
-                // Der Chip kann in RX stehen OHNE PLL-Lock — dann empfaengt er
-                // STILL nichts: kein Fehlerbit, keine Meldung, nur ausbleibende
-                // Frames. SWRS061I §22.1 p.58 nennt FSCAL1!=0x3F als Lock-Beleg
-                // und verlangt Nachkalibrieren. Was der Check faengt: eine
-                // gescheiterte (Auto-)Kalibrierung beim RX-Eintritt (MCSM0
-                // FS_AUTOCAL=01 kalibriert bei jedem IDLE->RX; genau den Fall
-                // sah tsculfw als "stuck in RX without PLL lock"). Was er NICHT
-                // faengt: Lock-Verlust durch Drift bei stehendem RX — FSCAL1 ist
-                // ein Kalibrier-Ergebnis, kein Live-Detektor. Bewiesen 08-17:
-                // FSCAL1:=0x3F -> Recal <1 s; FREQ2:=0x00 -> pll_fail zaehlt.
-                // Nur hier im Heartbeat und nur aus RX heraus — laufende TX/
-                // Calibrate-Phasen bleiben unangetastet (Regression 0.1.136).
-                drv_->note_lock_lost();
-                drv_->strobe(SIDLE);
-                drv_->calibrate();
-                drv_->strobe(SRX);
-            }
-            continue;
-        }
-        drain_fifo();
+        if (notified) drain_fifo();
+        // Ohne Meldung: alle IDLE_POLL_MS ein MARCSTATE-Blick (Chip nach einem
+        // Paket mit CRC-Fehler in IDLE). Einmal je HEARTBEAT_MS die volle
+        // Pruefung samt PLL-Lock, auch bei dauerndem Empfang (bis 0.2.0 lief
+        // sie nur nach 1 s ohne Meldung). GDO2-Level wird dort mit gepollt,
+        // falls eine Flanke verpasst wurde (a-culfw rf_asksin.c:147 ebenso).
+        const TickType_t now = xTaskGetTickCount();
+        const bool heartbeat = (now - last_hb) >= pdMS_TO_TICKS(HEARTBEAT_MS);
+        if (heartbeat) last_hb = now;
+        if (!notified || heartbeat) recover_rx_(heartbeat);
     }
 }
 
@@ -278,6 +323,12 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
 
     encrypt(msg);
 
+    // Vom ersten STX bis zur Rueckkehr nach RX kein SIDLE/SRX aus dem RX-Task.
+    // Der haelt die Sperre nur fuer wenige SPI-Zugriffe; wird sie trotzdem nicht
+    // frei, lieber ungesperrt senden als die Sendung verwerfen.
+    MtxGuard lk(chip_mtx_, pdMS_TO_TICKS(100));
+    if (!lk.held) ESP_LOGW(TAG, "tx: Chipsperre belegt, sende ungesperrt");
+
     // 1) CCA-Loop: STX strobe bis MARCSTATE==TX, Timeout 1.5 s.
     // a-culfw asksin_send macht hier KEINEN Pre-Flight-Check (chip kann in
     // IDLE/RX/sonstigem stecken). CCA-Mode=11 sorgt dafuer dass STX aus RX
@@ -297,8 +348,21 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
             drv_->strobe(SIDLE); drv_->strobe(SRX);
             return ESP_ERR_TIMEOUT;
         }
-        vTaskDelay(pdMS_TO_TICKS(8));    // a-culfw pollt mit ~8ms Tick-Rate
+        // 1 Tick = 10 ms (a-culfw pollt mit ~8 ms). pdMS_TO_TICKS(8) ist bei
+        // CONFIG_FREERTOS_HZ=100 ganzzahlig 0: bis 0.2.0 lief die CCA-Schleife
+        // bis zu 1,5 s, ohne zu blockieren (wie wmbus_rf.cpp, Review 0201 F2).
+        vTaskDelay(1);
     }
+
+    // 2) Sendezeit in den Sendekredit buchen, ohne je abzulehnen (Dirk
+    // 31.10.2026; a-culfw belastet ihn bei AskSin gar nicht, `X` zeigte die
+    // Funklast deshalb nicht). Ab hier sendet der Chip: Praeambel bis zum
+    // FIFO-Schreiben (10 ms, bei Burst 360 ms), dann Sync (4 Byte, SYNC_MODE 3),
+    // Laengenbyte, Nutzdaten und CRC (2 Byte) mit ~10 kbit/s = 0,8 ms je Byte.
+    // Einheit 10 ms wie credit_10ms, aufgerundet.
+    const uint32_t air_ms = ((ctl_clear & 0x10) ? 360u : 10u) + ((f->len + 7u) * 8u) / 10u;
+    const uint16_t air10  = static_cast<uint16_t>((air_ms + 9u) / 10u);
+    RfStats::instance().consume_floor(air10);
 
     // 3) BURST-Preamble. a-culfw rf_asksin.c:271ff:
     //   - ctl & 0x10 (Bit 4): 360 ms Preamble (3 * 120 ms — uint8 Loop-Limit).
@@ -320,16 +384,19 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
     // 5) Hard-Wait nach FIFO-Write (CC1101-SPI-Errata, siehe Moritz). Frame-TX
     // bei 30 Bytes / 10 kbit/s = ~25 ms. Wir warten 30 ms hart, dann pollen.
     vTaskDelay(pdMS_TO_TICKS(30));
-    for (int i = 0; i < 250; ++i) {
+    // Danach bis 250 ms auf die Rueckkehr nach RX warten, nach der Uhr statt
+    // nach Durchlaeufen: pdMS_TO_TICKS(1) ist bei 100 Hz 0, die 250 Durchlaeufe
+    // dauerten bis 0.2.0 nur wenige ms, und Rahmen ab ~40 Byte endeten in
+    // NoReturnRx samt SIDLE mitten in der eigenen Sendung (gemessen 31.10.2026:
+    // len 44 in 4 von 5, len 52 in 5 von 5 Faellen; bis len 36 keiner).
+    const int64_t rx_deadline = esp_timer_get_time() + 250'000;
+    while (true) {
         ms = marc_state(*drv_);
         if (ms == MARC_RX) {
             last_tx_marc_ = ms;
-            // a-culfw checkt KEIN credit_10ms in AskSin (siehe rf_asksin.c) — nur
-            // Stats-Counter erfassen, kein LOVF. AskSin-Frames sind ueblicherweise
-            // BURST-getriggert von Endgeraeten (Reaktion), Duty-Cycle wird durch
-            // Anwendungslogik begrenzt.
-            uint16_t airtime = (uint16_t)((((uint16_t)f->len + 1) * 8u) / 10u);
-            RfStats::instance().on_tx(ProtocolId::AskSin, f->len, airtime);
+            // Kredit ist oben gebucht (Schritt 2), kein LOVF: eine Quittung an
+            // ein HM-Geraet darf nicht ausfallen, wenn der Kredit leer ist.
+            RfStats::instance().on_tx(ProtocolId::AskSin, f->len, air10);
             return ESP_OK;
         }
         if (ms == MARC_TXFIFO_UNDERFLOW) {
@@ -339,7 +406,8 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
             drv_->strobe(SNOP);
             drv_->strobe(SRX);
         }
-        vTaskDelay(pdMS_TO_TICKS(1));
+        if (esp_timer_get_time() > rx_deadline) break;
+        vTaskDelay(1);
     }
     last_tx_err_  = TxError::NoReturnRx;
     last_tx_marc_ = ms;
@@ -404,6 +472,9 @@ esp_err_t AskSinRF::start(uint8_t slot_id, CC1101Driver& drv) {
         ets_delay_us(10);
     }
 
+    if (!chip_mtx_) chip_mtx_ = xSemaphoreCreateMutex();
+    if (!chip_mtx_) return ESP_ERR_NO_MEM;
+
     if (!task_handle_) {
         TaskHandle_t h = nullptr;
         if (xTaskCreate(&AskSinRF::rx_task_trampoline, "asksin-rx", 4096, this, 8, &h) != pdPASS) {
@@ -419,6 +490,8 @@ esp_err_t AskSinRF::start(uint8_t slot_id, CC1101Driver& drv) {
     ESP_LOGI(TAG, "started on slot %u (status=0x%02x)", slot_id, drv.last_status());
 
     enabled_ = true;   // ab hier darf der RX-Task ans Radio
+    // Aus dem Sekundentakt des deaktivierten Tasks in den 10-ms-Takt holen.
+    if (task_handle_) xTaskNotifyGive(static_cast<TaskHandle_t>(task_handle_));
     return ESP_OK;
 }
 

@@ -1121,7 +1121,7 @@ void setup_config_registry(ConfigRegistry& cfg) {
 
     reg_stats_u32("stats.rf.credit",
                   [] { return (uint32_t)RfStats::instance().credit(); },
-                  "Current TX credit (10 ms units, a-culfw credit_10ms; +1/s)");
+                  "Current TX credit (10 ms units, a-culfw credit_10ms; +1/s). AskSin is debited but never refused; SlowRF/MAX! answer LOVF when it is used up");
     reg_stats_u32("stats.rf.credit_max",
                   [] { return (uint32_t)RfStats::instance().credit_max(); },
                   "Maximum TX credit (a-culfw MAX_CREDIT = 900 = 9 s burst)");
@@ -1429,6 +1429,19 @@ extern "C" void app_main(void) {
     {
         auto slowrf = std::make_shared<SlowRfRF>();
         slowrf->set_pa_provider(pa_from_eeprom);
+        // Register 0x00..0x28 aus EE_CC1100_CFG (a-culfw ccInitChip). Ein
+        // ungeschriebener Bereich (alles 0xFF) laesst SLOWRF_CFG stehen.
+        static_assert(SlowRfRF::kCfgRegs == ee::CC1100_CFG_SIZE);
+        slowrf->set_cfg_provider([](std::span<uint8_t, SlowRfRF::kCfgRegs> regs) -> bool {
+            if (!g_eeprom) return false;
+            uint8_t ee_regs[SlowRfRF::kCfgRegs];
+            g_eeprom->read_block(ee::CC1100_CFG, ee_regs);
+            bool valid = false;
+            for (auto b : ee_regs) if (b != 0xFF) { valid = true; break; }
+            if (!valid) return false;
+            std::memcpy(regs.data(), ee_regs, SlowRfRF::kCfgRegs);
+            return true;
+        });
         g_mgr->register_protocol(slowrf);
     }
 #endif

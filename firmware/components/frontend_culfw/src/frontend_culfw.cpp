@@ -1296,7 +1296,17 @@ void handle_X(std::span<const char> args, Transport* src, uint8_t slot_id, RfMan
         return;
     }
 #endif
-    auto* sr = ensure_slowrf_active(slot_id, mgr);
+    // a-culfw set_txrestore(): X<maske != 0> ruft set_ccon() -> ccInitChip(
+    // EE_CC1100_CFG), laedt die Register also jedes Mal neu aus dem EEPROM --
+    // so uebernimmt FHEM ein per `W` gesetztes bWidth/rAmpl/sens. activate()
+    // auf die schon aktive Klasse ist genau das (stop, SRES, start unter der
+    // Slot-Sperre). Bis 0.2.0 lud X21 bei aktivem SlowRF nichts.
+    SlowRfRF* sr = nullptr;
+    if (mask != 0) {
+        if (slowrf && mgr->activate(ProtocolId::SlowRf, slot_id) == ESP_OK) sr = slowrf;
+    } else {
+        sr = ensure_slowrf_active(slot_id, mgr);
+    }
     if (sr) sr->set_tx_report(mask);
     // a-culfw silent on success.
 }

@@ -5,6 +5,8 @@
 
 #include "rf_protocol.hpp"
 #include "cc1101_driver.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <atomic>
 #include <span>
 
@@ -92,7 +94,14 @@ private:
     static void rx_task_trampoline(void* arg);
     void        rx_task_loop();
     void        drain_fifo();        // alle fertigen Rahmen: read, SRX, decrypt + callback
+    void        recover_rx_(bool heartbeat);   // Chip aus IDLE/Overflow zurueck nach RX
+    void        rearm_rx_();         // SRX aus IDLE, aber nicht waehrend tx()
     static void IRAM_ATTR gdo2_isr(void* arg);
+
+    // Haelt tx() fuer die ganze Sendung; der RX-Task strobt SIDLE/SRX nur, wenn
+    // er ihn ohne Warten bekommt. Ein SRX nach dem STX beendet die Sendung
+    // (SWRS061I 19.4, S. 52). Angelegt in start(); ohne (bind_for_tx) ungesperrt.
+    SemaphoreHandle_t chip_mtx_ = nullptr;
 
     CC1101Driver* drv_         = nullptr;
 

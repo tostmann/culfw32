@@ -14,6 +14,7 @@
 #include "driver/rmt_rx.h"
 #include "driver/rmt_tx.h"
 #include <atomic>
+#include <functional>
 #include <span>
 
 namespace culfw32 {
@@ -59,6 +60,14 @@ public:
     // Sendepegel aus dem EEPROM (a-culfw: ccInitChip laedt EE_CC1100_PA bei
     // jedem Mode-Start). Ohne Provider: fester Fallback 0 dBm ohne Ramping.
     void set_pa_provider(PaTableProvider p) { pa_provider_ = std::move(p); }
+
+    // Register 0x00..0x28 aus dem EEPROM (a-culfw ccInitChip(EE_CC1100_CFG)
+    // bei jedem Mode-Start und jedem X<maske != 0>). FHEM stellt Frequenz,
+    // bWidth, rAmpl und sens per `W` dort ein. Liefert der Provider false,
+    // gilt SLOWRF_CFG (gleiche Werte wie die EEPROM-Defaults).
+    static constexpr size_t kCfgRegs = 0x29;
+    using CfgProvider = std::function<bool(std::span<uint8_t, kCfgRegs> regs)>;
+    void set_cfg_provider(CfgProvider p) { cfg_provider_ = std::move(p); }
 
 private:
     // RX-Pipeline — RMT-Edge-Capture + Bucket-Decoder.
@@ -125,6 +134,7 @@ private:
 
     uint8_t  tx_report_   = 0;       // tx_report-Bitmaske
     PaTableProvider pa_provider_;    // EEPROM-PA-Tabelle, gesetzt von main
+    CfgProvider     cfg_provider_;   // EEPROM-Register 0x00..0x28, gesetzt von main
 
     // Repeat-Filter (a-culfw rf_receive.c:461..477). Default-X-Mask hat
     // REP_REPEATED=0 → wir suchen Duplikate innerhalb 304 ms und droppen sie,

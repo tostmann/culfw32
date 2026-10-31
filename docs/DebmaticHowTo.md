@@ -375,7 +375,7 @@ This shows the `fd ...` wrappers byte-exact, and you can compare them with the w
 - **AES** (phase 4 AES) is not implemented — `APP_SET_CURRENT_KEY/PREVIOUS_KEY/TEMP_KEY` frames are ACKed plainly, keys are neither persisted nor used for crypto. In concrete terms: HM-Sec-* devices (alarm- and security-relevant) do not ACK control commands (state=AES_KO in rfd). HM-LC/HM-PB/HM-CC/HM-WDS work fully. Phase 4 AES comes in v1.x+1.
 - **Peer table** is not persistent across reboots of the stick. After a CULFW32 reboot, devices have to be detected again (rfd does this automatically within 60-120 s).
 - **HmIP line** is entirely outside this frontend. HmIP uses a different wire stack with AES-CCM and its own pairing daemon (`HmIPServer.jar`, eq-3 closed source). No plan for phase 5+.
-- **LAN mode (HM-CFG-LAN)** with ASCII wrapper + AES challenge on the wire layer is not implemented and not planned. CULFW32 implements only the UART/UDP path.
+- **LAN-gateway mode** (HM-LGW-O-TW-W-EU protocol) is not implemented and not planned. CULFW32 implements only the UART/UDP path.
 
 ---
 

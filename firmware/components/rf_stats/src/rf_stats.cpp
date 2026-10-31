@@ -89,6 +89,14 @@ bool RfStats::try_consume(uint16_t units) {
     return false;
 }
 
+void RfStats::consume_floor(uint16_t units) {
+    if (units == 0) return;
+    uint16_t cur = credit_10ms_.load(std::memory_order_relaxed);
+    while (!credit_10ms_.compare_exchange_weak(cur, cur > units ? (uint16_t)(cur - units) : 0,
+                                               std::memory_order_relaxed)) {
+    }
+}
+
 void RfStats::grant(uint16_t units) {
     if (units == 0) return;
     uint16_t cur = credit_10ms_.load(std::memory_order_relaxed);

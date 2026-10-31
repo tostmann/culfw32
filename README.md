@@ -26,6 +26,10 @@ Sub-GHz radio gateway for smart-home stacks such as FHEM, Homegear, debmatic, Ra
 
 > The 433 MHz OOK family (`i k Y L h G`) is excluded from v1 — the current antenna matching is for 868 MHz; a 433 MHz SKU is a follow-on.
 
+**Send credit (duty cycle).** As in a-culfw, `X` shows the send credit in 10 ms units (maximum 900, +1 per second). SlowRF and MAX! transmissions are refused with `LOVF` when it runs out. Unlike a-culfw, AskSin transmissions are debited too (a burst frame costs about 38 units) but never refused, so heavy HomeMatic traffic can make FS20 or MAX! answer `LOVF` until the credit has recovered.
+
+**CC1101 settings from the EEPROM.** As in a-culfw, SlowRF loads registers 0x00..0x28 from the EEPROM copy written with `W` (FHEM: frequency, `bWidth`, `rAmpl`, `sens`) whenever the mode starts and on every `X` with a non-zero mask. FSCTRL0 is the exception: the board's frequency calibration always replaces it. The SIGNALduino frontend uses its own fixed register set.
+
 ### Frontends
 
 | Path | Port / transport | Use case |

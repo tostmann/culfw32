@@ -2,7 +2,7 @@
 
 CULFW32 emulates the **HM-MOD-RPI-PCB** — eQ-3's radio module for Raspberry Pi CCU clones — over TCP. FHEM, Homegear, debmatic, piVCCU or RaspberryMatic see CULFW32 as an ordinary HomeMatic radio stick and talk to it using the 0xfd binary HMUARTLGW protocol.
 
-Wire protocol: **0xfd frame wrapper, CRC-16 (poly 0x8005, init 0xd77f), escape (0xfc + b^0x80), single-port TCP**. Identical to an HM-MOD-RPI-PCB connected directly via GPIO; **not** the HM-CFG-LAN mode (a different protocol with ASCII wrapper + AES challenge — not implemented by CULFW32 and not planned).
+Wire protocol: **0xfd frame wrapper, CRC-16 (poly 0x8005, init 0xd77f), escape (0xfc + b^0x80), single-port TCP**. Identical to an HM-MOD-RPI-PCB connected directly via GPIO; **not** the LAN-gateway protocol of the HM-LGW-O-TW-W-EU (not implemented by CULFW32 and not planned). Port 2325 is an emulation inside CULFW32, not a pass-through to a module on the serial port.
 
 > **Status 2026-04-28:** phases 0..3 DONE, byte-exact against FHEM in Docker + real eQ-3 HomeMatic hardware:
 > - **HM-LC-Sw1-Pl-2** (plug-in switch, HMID `1A2B3C`, FW 0xA1 = v1.6): full pairing + `set on/off` verified physically (LED on/off)
@@ -69,7 +69,7 @@ attr   myhm hmId F11234
 attr   myhm verbose 5
 ```
 
-> **The `uart://` prefix is mandatory** — without it, FHEM selects the HM-CFG-LAN mode (ASCII wrapper + AES challenge on port +1). That is a different protocol, not implemented by CULFW32.
+> **The `uart://` prefix is mandatory** — without it, `00_HMUARTLGW.pm` treats the address as an HM-LGW-O-TW-W-EU LAN gateway (`DevType` LGW, with a second keep-alive connection). That is a different protocol, not implemented by CULFW32; the interface never initializes. FHEM also opens its keep-alive connection on port + 1, which is 2326, the SIGNALduino port of CULFW32.
 
 `hmId` is the 3-byte CCU address with which CULFW32 presents itself as a CCU to HomeMatic devices. Free to choose — preferably a hex number that does not collide with existing device HMIDs (e.g. `F11234`). After it is set for the first time, FHEM writes this ID into the CULFW32 EE via `APP_SET_HMID`; it persists across reboots.
 
@@ -302,7 +302,7 @@ define teststub HMUARTLGW uart://localhost:2325
 - **AES**: storage-only, no crypto processing (see above — phase 4, v1.x+1).
 - **Wall push button pairing** at >1 m with the test board is marginal — the hardware spin (BALUN + proper antenna matching) solves this. Mains-powered devices are reliable even at 2 m.
 - **Peer table** is not persistent — empty after each FHEM reconnect. It works without it, because AskSinRF runs promiscuously and FHEM CUL_HM filters on the dst side. Persistence would be a nice-to-have for faster reconnects.
-- **HMUARTLGW LAN mode** (HM-CFG-LAN, ASCII wrapper, AES challenge on the wire layer) is not implemented and not planned. If you need an HM-CFG-LAN-compatible box: an existing CUL868 + your own `socat` bridge is the way.
+- **HMUARTLGW LAN-gateway mode** (HM-LGW-O-TW-W-EU protocol, what FHEM uses when the define has no `uart://` prefix) is not implemented and not planned.
 - **HmIP line** (HomeMatic IP) is entirely outside this frontend. HmIP uses a different wire stack with AES-CCM and its own pairing daemon (`HmIPServer.jar`, eq-3 closed source). No plan for phase 5+.
 
 ---
