@@ -86,6 +86,9 @@ private:
         // Trampoline gegen das schon freigegebene Transport-Objekt (UAF/ABA bei
         // Memory-Reuse → doppelte Hello-Pushes oder Crash).
         void*            hello_timer = nullptr;
+        // true, sobald diese Verbindung einen gueltigen Rahmen geschickt hat und
+        // AskSin auf Slot 0 eingefordert wurde (siehe claim_radio_()).
+        bool             radio_claimed = false;
     };
 
     void on_rx_data_(std::span<const uint8_t> bytes, Transport* src);
@@ -107,9 +110,46 @@ private:
     // OS-Layer (Phase 1) — alle Antwort-Formate byte-genau gegen FHEM-Trace
     // 2026-04-28 (siehe Memory hmuartlgw_protocol_spec.md).
     HmuFrame build_os_response_(const HmuFrame& req);
-    // APP-Layer (Phase 2): APP_SEND → AskSinRF::tx, GET_HMID/SET_HMID, peer-table stub.
-    HmuFrame build_app_response_(const HmuFrame& req);
+    // APP-Layer (Phase 2): APP_SEND → AskSinRF::tx, GET_HMID/SET_HMID; im
+    // Legacy-Modus zusaetzlich ADD_PEER/REMOVE_PEER mit Peer-Tabelle.
+    HmuFrame build_app_response_(const HmuFrame& req, ModuleMode mod);
     HmuFrame handle_app_send_(const HmuFrame& req);
+
+    // Ein echtes Modul empfaengt immer BidCoS. Steht Slot 0 auf einer anderen
+    // Klasse (z. B. `X21` ueber den culfw-Port), schaltet der erste gueltige
+    // Rahmen einer HMU-Verbindung auf AskSin zurueck. mtx_ gehalten.
+    void claim_radio_();
+
+    // Peer-Tabelle des HM-MOD-RPI-PCB (Legacy). FHEM verwirft seine eigene
+    // Quittung an jedes Geraet, das es dort eingetragen hat (00_HMUARTLGW.pm:
+    // "Acks are generally send by HMUARTLGW autonomously") — das Modul muss
+    // fuer diese Geraete selbst quittieren. Im Dual-Modus quittiert multimacd
+    // selbst; dort wird nichts eingetragen. Leer, sobald keine Legacy-
+    // Verbindung mehr besteht (FHEM traegt nach jedem Init alles neu ein).
+    // 256 * 4 Byte. Ein volles Modul meldet "nicht eingetragen", und FHEM
+    // loggt dann dieselbe "aesKey"-Meldung wie bei einer falschen Antwort.
+    static constexpr size_t kMaxPeers = 256;
+    struct Peer {
+        uint8_t id[3];
+        // ADD_PEER Byte 5 ("Wakeup?", 00_HMUARTLGW.pm UpdatePeerReq). FHEM
+        // setzt es fuer Weck- und Lazy-Config-Geraete, solange Befehle fuer
+        // sie anstehen (10_CUL_HM.pm hmInitMsgUpdt: flgs |= 0x02, dann
+        // "init:" -> neues ADD_PEER), und nimmt es danach zurueck. Das Modul
+        // quittiert solche Geraete mit dem Wach-Bit (Flag 0x81), damit sie
+        // auf die Befehle warten — siehe auto_ack_().
+        bool    wakeup;
+    };
+    int      peer_index_(const uint8_t* id) const;     // peer_mtx_ MUSS gehalten sein; -1 = unbekannt
+    bool     peer_add_(const uint8_t* id, bool wakeup); // dito; aktualisiert wakeup bei bekanntem Peer
+    void     peer_remove_(const uint8_t* id);           // dito
+    HmuFrame build_peer_reply_(const HmuFrame& req, bool added) const;
+    // Rahmen an die eigene HMID mit Quittungswunsch von einem eingetragenen
+    // Peer quittieren, fruehestens kAutoAckDelayMs nach dem Lesen des Rahmens
+    // (rx_us), spaetestens bis kAutoAckLateMs, sonst gar nicht. Laeuft im
+    // AskSin-RX-Task, ohne mtx_, nach der Weitergabe an die Hosts.
+    static constexpr uint32_t kAutoAckDelayMs = 100;
+    static constexpr uint32_t kAutoAckLateMs  = 200;
+    void     auto_ack_(const struct AskSinFrame& af, uint32_t rx_us);
 
     // RX-Subscription auf AskSinRF — wrappt RxEvent als APP_RECV Frame und
     // broadcastet an alle aktuellen HMUARTLGW-Transports.
@@ -118,6 +158,13 @@ private:
     std::vector<std::shared_ptr<Transport>> transports_;
     std::array<PerTransport, kMaxTransports> per_transport_{};
     SemaphoreHandle_t mtx_ = nullptr;
+
+    // Eigene Sperre fuer Peer-Tabelle und hmid_-Schreiben: der RX-Task fragt
+    // sie je Rahmen ab und soll nicht an mtx_ warten, den on_rx_data_ ueber
+    // eine ganze Sendung haelt. Reihenfolge: mtx_ -> peer_mtx_.
+    SemaphoreHandle_t peer_mtx_ = nullptr;
+    std::array<Peer, kMaxPeers> peers_{};
+    size_t peer_count_ = 0;
 
     FrontendServices services_{};
     bool started_ = false;

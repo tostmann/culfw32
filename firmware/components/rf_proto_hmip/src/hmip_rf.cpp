@@ -105,8 +105,7 @@ void HmipRF::drain_fifo() {
         frame.lqi_raw  = lqi;
 
         // RSSI dBm (CC1101 §17.3 / a-culfw cc1100.c).
-        int8_t rs = static_cast<int8_t>(rssi);
-        int16_t rssi_dbm = (rs < 0) ? (rs / 2 - 74) : (rs / 2 + 64 - 74);
+        int16_t rssi_dbm = cc1101_rssi_dbm(rssi);
         if (rssi_dbm < -128) rssi_dbm = -128;
         if (rssi_dbm > 127)  rssi_dbm =  127;
         // CRC-Fehler kommen hier nicht an: CRC_AUTOFLUSH verwirft solche

@@ -135,7 +135,8 @@ void RfManager::on_proto_rx_(const RxEvent& ev) {
     }
 }
 
-esp_err_t RfManager::tx(ProtocolId proto, const void* typed_payload, size_t size) {
+esp_err_t RfManager::tx(ProtocolId proto, const void* typed_payload, size_t size,
+                        uint32_t lock_timeout_ms) {
     // Aktive Slot-Klasse pruefen — wenn die Multi-Proto-TX kann (HmDualRF etc.),
     // delegiert sie selbst. Sonst Standard-Pfad: find_protocol -> tx.
     //
@@ -147,9 +148,13 @@ esp_err_t RfManager::tx(ProtocolId proto, const void* typed_payload, size_t size
     for (auto& slot : slots_) {
         auto active = slot->active();
         if (active && active->supports_tx(proto)) {
-            auto lk = slot->lock();
+            auto lk = slot->lock(lock_timeout_ms);
             if (!lk.held()) {
-                ESP_LOGE(TAG, "tx: Slot %u belegt, Sendung verworfen", slot->id());
+                // Mit verkuerzter Frist ist Ablauf ein erwarteter Ausgang, den
+                // der Aufrufer selbst meldet (HMU-Selbstquittung).
+                if (lock_timeout_ms >= CC1101Slot::kOpTimeoutMs) {
+                    ESP_LOGE(TAG, "tx: Slot %u belegt, Sendung verworfen", slot->id());
+                }
                 return ESP_ERR_TIMEOUT;
             }
             // Nach dem Warten neu lesen: der Vorbesitzer der Sperre kann den

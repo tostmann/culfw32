@@ -121,6 +121,10 @@ private:
     TxError last_tx_err_ = TxError::None;
     uint8_t last_tx_marc_ = 0;
     bool    update_mode_ = false;
+    // Sendezeit unter 10 ms, die noch nicht in den Sendekredit gebucht ist
+    // (0..9). Nur in tx() angefasst; serialisiert durch die Slot-Sperre, die
+    // RfManager::tx ueber die ganze Sendung haelt (dazu chip_mtx_).
+    uint8_t air_rest_ms_ = 0;
 
     // Diagnostik-State ist process-global: HmDualRF haelt eine zweite
     // AskSinRF-Instanz als TX-Helper, beide tx-Pfade landen am selben CC1101.

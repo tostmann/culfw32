@@ -179,8 +179,7 @@ void AskSinRF::drain_fifo() {
         frame.lqi_raw  = lqi;
 
         // RSSI dBm (CC1101 §17.3 / a-culfw cc1100.c).
-        int8_t rs = static_cast<int8_t>(rssi);
-        int16_t rssi_dbm = (rs < 0) ? (rs / 2 - 74) : (rs / 2 + 64 - 74);
+        int16_t rssi_dbm = cc1101_rssi_dbm(rssi);
         if (rssi_dbm < -128) rssi_dbm = -128;
         if (rssi_dbm > 127)  rssi_dbm =  127;
         // CRC-Fehler kommen hier nicht an: CRC_AUTOFLUSH verwirft solche
@@ -389,9 +388,13 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
     // Funklast deshalb nicht). Ab hier sendet der Chip: Praeambel bis zum
     // FIFO-Schreiben (10 ms, bei Burst 360 ms), dann Sync (4 Byte, SYNC_MODE 3),
     // Laengenbyte, Nutzdaten und CRC (2 Byte) mit ~10 kbit/s = 0,8 ms je Byte.
-    // Einheit 10 ms wie credit_10ms, aufgerundet.
+    // Einheit 10 ms wie credit_10ms; der Rest unter 10 ms wandert in die
+    // naechste Sendung. Bis 0.2.2 rundete jede Sendung auf, eine Quittung
+    // (23 ms) kostete 30 ms (tsculfw fuehrt dafuer Subcredits).
     const uint32_t air_ms = ((ctl_clear & 0x10) ? 360u : 10u) + ((f->len + 7u) * 8u) / 10u;
-    const uint16_t air10  = static_cast<uint16_t>((air_ms + 9u) / 10u);
+    const uint32_t due_ms = air_ms + air_rest_ms_;
+    const uint16_t air10  = static_cast<uint16_t>(due_ms / 10u);
+    air_rest_ms_          = static_cast<uint8_t>(due_ms % 10u);
     RfStats::instance().consume_floor(air10);
 
     // 3) BURST-Preamble. a-culfw rf_asksin.c:271ff:
@@ -507,7 +510,11 @@ esp_err_t AskSinRF::start(uint8_t slot_id, CC1101Driver& drv) {
 
     if (!task_handle_) {
         TaskHandle_t h = nullptr;
-        if (xTaskCreate(&AskSinRF::rx_task_trampoline, "asksin-rx", 4096, this, 8, &h) != pdPASS) {
+        // 5120 statt 4096 seit 0.2.3: der Rueckruf sendet jetzt die HMUARTLGW-
+        // Selbstquittung ueber RfManager::tx -> tx() (Puffer 64 B, SPI-
+        // Transaktion, ESP_LOGW mit vollem newlib-vfprintf) unterhalb von
+        // Renderer und Transport. Tiefstmarke je Task in `?stats`.
+        if (xTaskCreate(&AskSinRF::rx_task_trampoline, "asksin-rx", 5120, this, 8, &h) != pdPASS) {
             return ESP_ERR_NO_MEM;
         }
         task_handle_ = h;

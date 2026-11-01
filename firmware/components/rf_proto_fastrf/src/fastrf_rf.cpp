@@ -122,8 +122,7 @@ void FastRfRF::rx_task_loop() {
         frame.rssi_raw = rssi;
         frame.lqi_raw  = lqi_crc;
 
-        int8_t rs = static_cast<int8_t>(rssi);
-        int16_t rssi_dbm = (rs < 0) ? (rs / 2 - 74) : (rs / 2 + 64 - 74);
+        int16_t rssi_dbm = cc1101_rssi_dbm(rssi);
         if (rssi_dbm < -128) rssi_dbm = -128;
         if (rssi_dbm > 127)  rssi_dbm =  127;
         if (!(lqi_crc & 0x80)) RfStats::instance().on_crc_error(ProtocolId::FastRf);

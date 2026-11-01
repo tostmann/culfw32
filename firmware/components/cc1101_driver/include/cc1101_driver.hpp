@@ -329,4 +329,13 @@ private:
     SemaphoreHandle_t     spi_mtx_ = nullptr;
 };
 
+// RSSI-Statusbyte (oder das an ein Paket angehaengte) in dBm, SWRS061I §17.3:
+// Zweierkomplement / 2 - RSSI_offset, Offset 74 dB bei 868 MHz fuer alle
+// Datenraten (Tabelle 31). Bereich -138..-11 dBm, das halbe dB faellt weg.
+// Bis 0.2.2 rechneten die RX-Pfade fuer Rohwerte < 0x80 (Pegel ueber -74 dBm)
+// "+ 64" dazu und meldeten in `?stats` positive dBm.
+constexpr int16_t cc1101_rssi_dbm(uint8_t raw) {
+    return static_cast<int16_t>(static_cast<int8_t>(raw) / 2 - 74);
+}
+
 } // namespace culfw32

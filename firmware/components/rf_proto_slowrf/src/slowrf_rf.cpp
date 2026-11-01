@@ -696,8 +696,7 @@ void SlowRfRF::process_symbols_(const rmt_symbol_word_t* syms, size_t n) {
 
 void SlowRfRF::emit_frame_(const SlowRfFrame& f) {
     // CC1101 RSSI (a-culfw cc1100.c:rxrssi): raw → dBm via 2's-complement /2 - 74.
-    int8_t raw = static_cast<int8_t>(f.rssi_raw);
-    int16_t rssi_dbm = (raw < 0) ? (raw / 2 - 74) : (raw / 2 + 128 / 2 - 74);
+    int16_t rssi_dbm = cc1101_rssi_dbm(f.rssi_raw);
     if (rssi_dbm < -128) rssi_dbm = -128;
     if (rssi_dbm > 127)  rssi_dbm =  127;
     RfStats::instance().on_rx(ProtocolId::SlowRf, f.len, static_cast<int8_t>(rssi_dbm));

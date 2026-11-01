@@ -396,8 +396,7 @@ void WmbusRF::rx_step() {
             }
 
             if (status == wmbus::PACKET_OK) {
-                int8_t rssi_s = static_cast<int8_t>(rssi);
-                int16_t rssi_dbm = (rssi_s < 0) ? (rssi_s / 2 - 74) : (rssi_s / 2 + 64 - 74);
+                int16_t rssi_dbm = cc1101_rssi_dbm(rssi);
                 if (rssi_dbm < -128) rssi_dbm = -128;
                 if (rssi_dbm > 127)  rssi_dbm =  127;
                 RfStats::instance().on_rx(ProtocolId::Mbus,

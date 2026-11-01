@@ -65,6 +65,8 @@ constexpr uint8_t APP_GET_HMID            = 0x01;
 constexpr uint8_t APP_SEND                = 0x02;
 constexpr uint8_t APP_SET_CURRENT_KEY     = 0x03;
 constexpr uint8_t APP_RECV                = 0x05;
+constexpr uint8_t APP_ADD_PEER            = 0x06;
+constexpr uint8_t APP_REMOVE_PEER         = 0x07;
 constexpr uint8_t APP_SET_TEMP_KEY        = 0x0B;
 constexpr uint8_t APP_SET_PREVIOUS_KEY    = 0x0F;
 constexpr uint8_t APP_DEFAULT_HMID        = 0x10;
@@ -83,6 +85,20 @@ constexpr uint8_t ACK_ENOCREDITS  = 0x05;
 constexpr uint8_t ACK_ECSMACA     = 0x06;
 constexpr uint8_t ACK_MULTIPART   = 0x07;
 
+// BidCoS-Rahmen ab dem Laengenbyte: [0]=LEN [1]=CNT [2]=FLAG [3]=TYP
+// [4..6]=Absender [7..9]=Ziel.
+constexpr uint8_t BIDCOS_FLAG_BIDI = 0x20;   // Absender erwartet Quittung
+constexpr uint8_t BIDCOS_FLAG_WKUP = 0x01;   // in der Quittung: Empfaenger bleibt wach
+constexpr uint8_t BIDCOS_TYPE_ACK  = 0x02;
+
+// RSSI im Format des Moduls: Betrag in dBm, FHEM rechnet `0 - hex()`
+// (00_HMUARTLGW.pm). Bis 0.2.2 ging das rohe CC1101-Byte hinaus: 0x41 wurde
+// zu -65 statt -41,5 dBm, ab 0x80 zu Werten um -200.
+uint8_t hmu_rssi(uint8_t raw) {
+    const int dbm = cc1101_rssi_dbm(raw);   // -138..-11
+    return static_cast<uint8_t>(-dbm);
+}
+
 // Forward — Definition unten direkt nach send_hello_.
 HmuFrame make_co_cpu_app_push(uint8_t cnt);
 
@@ -95,6 +111,7 @@ std::span<const ProtocolId> HmuartlgwFrontend::compatible_protocols() const {
 void HmuartlgwFrontend::attach(const FrontendServices& services) {
     services_ = services;
     if (!mtx_) mtx_ = xSemaphoreCreateMutex();
+    if (!peer_mtx_) peer_mtx_ = xSemaphoreCreateMutex();
 
     // HMID aus EE laden — falls 0xFFFFFF (noch nie provisioned), bei
     // 0xCAFE42 (Bringup-Default) bleiben damit FHEM einen lesbaren Wert sieht.
@@ -155,6 +172,7 @@ void HmuartlgwFrontend::attach_dynamic_transport(std::shared_ptr<Transport> t, M
                 s.owner  = raw;
                 s.mode   = HostMode::AwaitingProbe;
                 s.module = mode;
+                s.radio_claimed = false;
                 s.decoder.reset();
                 break;
             }
@@ -191,9 +209,11 @@ void HmuartlgwFrontend::detach_dynamic_transport(Transport* t) {
         }
     }
     void* timer_to_kill = nullptr;
+    bool legacy_left = false;
     for (auto& pt : per_transport_) {
         if (pt.owner == t) {
             pt.owner = nullptr;
+            pt.radio_claimed = false;
             pt.decoder.reset();
             // Pending Hello-Timer fuer diesen Slot stoppen+loeschen — sonst
             // feuert das Trampoline asynchron gegen den schon zerstoerten
@@ -203,7 +223,20 @@ void HmuartlgwFrontend::detach_dynamic_transport(Transport* t) {
                 timer_to_kill = pt.hello_timer;
                 pt.hello_timer = nullptr;
             }
+        } else if (pt.owner && pt.module == ModuleMode::Legacy && pt.radio_claimed) {
+            // Nur Verbindungen, die schon einen gueltigen Rahmen geschickt
+            // haben: eine stumme auf 2325 haelt die Tabelle nicht fest.
+            legacy_left = true;
         }
+    }
+    // Ohne Legacy-Verbindung quittiert niemand mehr selbst: ein spaeterer
+    // Klient (etwa ein CUL-Device auf 2323) quittiert selbst, eine zweite
+    // Quittung waere doppelt. FHEM traegt nach dem naechsten Init neu ein.
+    if (!legacy_left && peer_mtx_) {
+        xSemaphoreTake(peer_mtx_, portMAX_DELAY);
+        if (peer_count_) ESP_LOGI(TAG, "peer table cleared (%u)", static_cast<unsigned>(peer_count_));
+        peer_count_ = 0;
+        xSemaphoreGive(peer_mtx_);
     }
     xSemaphoreGive(mtx_);
     if (timer_to_kill) {
@@ -261,8 +294,12 @@ void HmuartlgwFrontend::on_rx_data_(std::span<const uint8_t> bytes, Transport* s
     // nimmt ihn nur on_asksin_rx_ kurz fuer den Transport-Snapshot, und der
     // RX-Task haelt dabei keine RF-Sperre (AskSinRF::drain_fifo gibt die
     // Chipsperre vor dem Callback frei). Reihenfolge: mtx_ -> Slot -> Chip ->
-    // Bus; der RX-Task nimmt nur Chip -> Bus und betritt Frontend-Code nur
-    // ohne Chipsperre (Review 0202 F2).
+    // Bus, und mtx_ -> peer_mtx_. Der RX-Task nimmt selbst nur Chip -> Bus und
+    // betritt Frontend-Code nur ohne Chipsperre (Review 0202 F2). Im Callback
+    // nimmt er nacheinander, nie verschachtelt: peer_mtx_ allein (auto_ack_
+    // prueft), Slot -> Chip -> Bus (Selbstquittung, Frist bis 200 ms nach dem Rahmen), mtx_ allein
+    // (Snapshot). claim_radio_() schaltet unter mtx_ um (mtx_ -> Slot, wie
+    // APP_SEND).
     // Sauberer Fix (deferred bis Build-/Regressions-Env wieder steht): in
     // handle_app_send_ die per-Transport-State-Mutation (pt->llmac_tx_cnt_++) +
     // Frame-Bau unter dem Lock erledigen, Lock freigeben, DANN asksin_send()
@@ -276,7 +313,12 @@ void HmuartlgwFrontend::on_rx_data_(std::span<const uint8_t> bytes, Transport* s
     }
     if (!pt) {
         for (auto& slot : per_transport_) {
-            if (!slot.owner) { slot.owner = src; pt = &slot; break; }
+            if (!slot.owner) {
+                slot.owner = src;
+                slot.radio_claimed = false;
+                pt = &slot;
+                break;
+            }
         }
     }
     if (!pt) {
@@ -288,6 +330,10 @@ void HmuartlgwFrontend::on_rx_data_(std::span<const uint8_t> bytes, Transport* s
     pt->decoder.feed(bytes);
     HmuFrame frame;
     while (pt->decoder.try_pop(frame)) {
+        if (!pt->radio_claimed) {
+            pt->radio_claimed = true;
+            claim_radio_();
+        }
         dispatch_(frame, src);
     }
 
@@ -388,7 +434,7 @@ void HmuartlgwFrontend::dispatch_(const HmuFrame& req, Transport* src) {
             (req.cmd() == TRX_GET_MCU_TYPE || req.cmd() == TRX_GET_VERSION)) {
             resp = build_trx_response_(req);
         } else {
-            resp = build_app_response_(req);
+            resp = build_app_response_(req, mod);
         }
     } else if (mod == ModuleMode::Dual && req.dst == kHmuDstCommon) {
         resp = build_common_response_(req, mod);
@@ -410,7 +456,7 @@ void HmuartlgwFrontend::dispatch_(const HmuFrame& req, Transport* src) {
             req.cmd() == LLMAC_GET_SERIAL) {
             resp = build_llmac_response_(req);
         } else if (req.cmd() == APP_SEND && req.payload.size() >= 13) {
-            resp = build_app_response_(req);
+            resp = build_app_response_(req, mod);
         } else if (req.cmd() == 0x06 && req.payload.size() >= 14) {
             // LLMAC_SEND: payload = [06][o1][o2][o3][o4][flags][mtype][src(3)][dst(3)][body...]
             // opts[3] (= req.payload[4]) ist die on-air AskSin-CNT die multimacd
@@ -692,10 +738,19 @@ HmuFrame HmuartlgwFrontend::build_os_response_(const HmuFrame& req) {
             break;
         }
         case OS_GET_CREDITS: {
-            // 1-Byte Load% (0=idle, 100=fully loaded). Wir mappen
-            // (max-credit - rf_stats.credit) / max-credit auf Prozent.
+            // FHEM fragt die Last alle 15 s und nach jeder zehnten Sendung ab
+            // (00_HMUARTLGW.pm CheckCredits / Write). Ein echtes Modul steht
+            // dabei immer im BidCoS-Empfang; hat inzwischen ein anderer Klient
+            // umgeschaltet (`X21` auf dem culfw-Port nach dem Verbinden), holt
+            // dieser Takt AskSin zurueck — bis 0.2.2 erst das naechste APP_SEND
+            // (Review 0203 H2). Ohne Abweichung tut claim_radio_() nichts.
+            claim_radio_();
+            // 1-Byte Last in halben Prozent der Stundenquote (FHEM:
+            // msgLoadCurrent = (load+1)/2, ab 199 sperrt es das Senden). Wir
+            // melden 0: der Sendekredit (?stats) lehnt AskSin nie ab, und die
+            // Abbildung des a-culfw-Kontos (Start bei der Haelfte) auf diese
+            // Skala ist nicht entschieden.
             uint8_t load = 0;
-            // Phase 0/1: einfach 0 (idle). Phase 1+ kann das aus rf_stats lesen.
             out.payload.insert(out.payload.end(), {ACK, ACK_INFO, load});
             break;
         }
@@ -723,7 +778,7 @@ HmuFrame HmuartlgwFrontend::build_os_response_(const HmuFrame& req) {
     return out;
 }
 
-HmuFrame HmuartlgwFrontend::build_app_response_(const HmuFrame& req) {
+HmuFrame HmuartlgwFrontend::build_app_response_(const HmuFrame& req, ModuleMode mod) {
     HmuFrame out;
     // Antwort auf der gleichen dst-Layer wie der Request, damit multimacd den
     // Reply auf das richtige Mmd-Slave-Device routet (im DualCoPro-Mode kommt
@@ -758,9 +813,12 @@ HmuFrame HmuartlgwFrontend::build_app_response_(const HmuFrame& req) {
         case APP_SET_HMID: {
             // payload[1..3] = neue HMID
             if (req.payload.size() >= 4) {
+                // Unter peer_mtx_: auto_ack_() liest hmid_ im RX-Task.
+                xSemaphoreTake(peer_mtx_, portMAX_DELAY);
                 hmid_[0] = req.payload[1];
                 hmid_[1] = req.payload[2];
                 hmid_[2] = req.payload[3];
+                xSemaphoreGive(peer_mtx_);
                 if (services_.eeprom) {
                     services_.eeprom->write_block(ee::HMU_HMID,
                         std::span<const uint8_t>(hmid_, 3));
@@ -781,6 +839,38 @@ HmuFrame HmuartlgwFrontend::build_app_response_(const HmuFrame& req) {
             break;
         case APP_SEND:
             return handle_app_send_(req);
+        case APP_ADD_PEER:
+        case APP_REMOVE_PEER: {
+            // FHEM: ADD_PEER = [06][id(3)][kNo][wakeup][00], REMOVE_PEER =
+            // [07][id(3)]. Bis 0.2.2 bekamen beide nur `04 01`; FHEM meldete
+            // "Adding peer ... failed! You have probably forced an unknown
+            // aesKey" und verwarf seine Quittungen trotzdem (Nutzerbericht 31.10.).
+            // Im Dual-Modus gibt es diese Befehle nicht — Antwort wie bisher.
+            if (mod != ModuleMode::Legacy || req.payload.size() < 4) {
+                out.payload.insert(out.payload.end(), {ACK, ACK_OK});
+                break;
+            }
+            const uint8_t* id = req.payload.data() + 1;
+            // Byte 5 = Wakeup (00_HMUARTLGW.pm UpdatePeerReq); FHEM schickt
+            // ADD_PEER fuer einen schon eingetragenen Peer erneut, wenn sich
+            // nur dieses Byte aendert (CUL_HM hmInitMsgUpdt: "init:" bei
+            // geaenderter newChn) — der Eintrag wird dann aktualisiert.
+            const bool wakeup = req.payload.size() >= 6 && req.payload[5] != 0;
+            bool added = false;
+            xSemaphoreTake(peer_mtx_, portMAX_DELAY);
+            if (req.cmd() == APP_ADD_PEER) {
+                added = peer_add_(id, wakeup);
+            } else {
+                peer_remove_(id);
+            }
+            HmuFrame r = build_peer_reply_(req, added);
+            xSemaphoreGive(peer_mtx_);
+            if (req.cmd() == APP_ADD_PEER && !added) {
+                ESP_LOGW(TAG, "peer table full (%u), %02X%02X%02X not added",
+                         static_cast<unsigned>(kMaxPeers), id[0], id[1], id[2]);
+            }
+            return r;
+        }
         case APP_TRX_GET_MCU_TYPE:
             // HB-RF-ETH/rfd-Detection-Probe fuer TRX-Class-Module (RPI-RF-MOD,
             // HmIP-RFUSB). Wir sind Legacy CoPro, NICHT TRX — explizit NACK
@@ -860,6 +950,147 @@ HmuFrame HmuartlgwFrontend::handle_app_send_(const HmuFrame& req) {
     return out;
 }
 
+void HmuartlgwFrontend::claim_radio_() {
+    if (!services_.rf_manager) return;
+    auto active = services_.rf_manager->active_protocol_on(0);
+    if (active && active->id() == ProtocolId::AskSin) return;
+    // Bis 0.2.2 schaltete erst das erste APP_SEND um; bis dahin empfing der
+    // Stick keine BidCoS-Rahmen (Nutzerbericht 31.10.: nach `X21` keine Thermostat-
+    // Meldungen, bis FHEM das erste Mal sendete).
+    if (services_.rf_manager->activate(ProtocolId::AskSin, 0) == ESP_OK) {
+        ESP_LOGI(TAG, "slot 0 -> AskSin (HMU client)");
+    } else {
+        ESP_LOGW(TAG, "slot 0 -> AskSin failed");
+    }
+}
+
+int HmuartlgwFrontend::peer_index_(const uint8_t* id) const {
+    for (size_t i = 0; i < peer_count_; ++i) {
+        if (std::memcmp(peers_[i].id, id, 3) == 0) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+bool HmuartlgwFrontend::peer_add_(const uint8_t* id, bool wakeup) {
+    const int i = peer_index_(id);
+    if (i >= 0) {
+        peers_[static_cast<size_t>(i)].wakeup = wakeup;
+        return true;
+    }
+    if (peer_count_ >= kMaxPeers) return false;
+    std::memcpy(peers_[peer_count_].id, id, 3);
+    peers_[peer_count_].wakeup = wakeup;
+    ++peer_count_;
+    return true;
+}
+
+void HmuartlgwFrontend::peer_remove_(const uint8_t* id) {
+    const int i = peer_index_(id);
+    if (i < 0) return;
+    peers_[static_cast<size_t>(i)] = peers_[peer_count_ - 1];
+    --peer_count_;
+}
+
+HmuFrame HmuartlgwFrontend::build_peer_reply_(const HmuFrame& req, bool added) const {
+    // `04 07 01 01 <Anzahl:2>` und beim Eintragen 8 Byte Kanalmaske dahinter.
+    // FHEM (HMUARTLGW_ParsePeer) unterscheidet "eingetragen" von "ausgetragen"
+    // allein an der Laenge; die Maske liest es negiert, jedes gesetzte Bit
+    // heisst dort "AES fuer diesen Kanal abschalten". 0xFF = nichts
+    // abzuschalten: dieses Modul kann kein AES. Beispiel aus dem FHEM-Quelltext:
+    // `040701010002fffffffffffffff9`; dieselbe Antwort hat die mCCU-Bruecke am
+    // 19.08.2026 gegen FHEM und einen echten HM-LC-Sw1-Pl-2 bestanden.
+    HmuFrame out;
+    out.dst = req.dst;
+    out.cnt = req.cnt;
+    out.payload.insert(out.payload.end(), {ACK, ACK_MULTIPART, 0x01, 0x01,
+        static_cast<uint8_t>(peer_count_ >> 8), static_cast<uint8_t>(peer_count_)});
+    if (added) out.payload.insert(out.payload.end(), 8, 0xFF);
+    return out;
+}
+
+void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t rx_us) {
+    // Regeln wie die mCCU-Bruecke (`_selbst_quittieren`, gegen FHEM und einen
+    // echten Aktor getestet): nur mit Quittungswunsch, nur an die eigene HMID,
+    // nur von eingetragenen Peers. Nicht quittiert werden 0x02 (Quittung),
+    // 0x03 (AES-Antwort) und 0x3F (Zeitanfrage, will eine Antwort). 0x00
+    // (Geraeteinfo) schon, anders als die Bruecke: FHEM unterdrueckt seine
+    // reine Quittung an eingetragene Peers unabhaengig vom Typ (Review 0203 F2).
+    // Status-Quittungen (`8002 … 0101<st>…`, z. B. fuer HM-SEC-SC) schickt FHEM
+    // zusaetzlich selbst, sie haben nicht die Laenge 24 (Review 0203 F1).
+    // Das tut es am echten Modul genauso; ob dieses vorher selbst quittiert,
+    // ist nicht gemessen.
+    if (af.len < 9 || !services_.rf_manager || !peer_mtx_) return;
+    const uint8_t* m = af.data;
+    if (!(m[2] & BIDCOS_FLAG_BIDI)) return;
+    const uint8_t type = m[3];
+    if (type == BIDCOS_TYPE_ACK || type == 0x03 || type == 0x3F) return;
+
+    uint8_t own[3];
+    bool    wakeup = false;
+    xSemaphoreTake(peer_mtx_, portMAX_DELAY);
+    std::memcpy(own, hmid_, 3);
+    const int idx = (std::memcmp(m + 7, own, 3) == 0) ? peer_index_(m + 4) : -1;
+    if (idx >= 0) wakeup = peers_[static_cast<size_t>(idx)].wakeup;
+    xSemaphoreGive(peer_mtx_);
+    if (idx < 0) return;
+
+    // Quittung wie FHEM sie baut (CUL_HM: `<cnt> 80 02 <eigene> <Geraet> 00`).
+    // Fuer einen Peer mit Wakeup-Byte im ADD_PEER traegt sie das Wach-Bit
+    // (`81 02`): so quittiert CUL_HM ueber einen CUL, solange Befehle fuer ein
+    // Weck- oder Lazy-Config-Geraet anstehen (10_CUL_HM.pm 3777–3783,
+    // 3791–3797: `8102` nur fuer andere IO-Typen, "HMLAN and HMUARTLGW does it
+    // automatically if configured to lazy config"; 3730–3735: Flag |= 0x01 fuer
+    // jede Quittung, die reine 0x80 ist bei HMUARTLGW uebersprungen). Das Bit
+    // haelt das Geraet wach (AskSinPP Message.h WKUP = 0x01 "keep the device
+    // awake", Device.h: stayAwake 500 ms), bis 0.2.2 schlief es nach der
+    // Quittung sofort wieder ein und FHEMs Befehle liefen ins Leere.
+    // Zeitpunkt: 100..120 ms nach dem Rahmen, nicht sofort. Gemessen
+    // 01.11.2026 an einem HM-TC-IT-WM-W-EU (getConfig ueber FHEM): Quittungen
+    // ~12 ms und ~60 ms nach seinem Rahmen ignorierte er (dreimal wiederholt,
+    // RESPONSE TIMEOUT), mit 81..100 ms nahm er 42 von 42 an. FHEM ueber einen
+    // CUL quittiert ~110 ms danach (im FHEM-Log: `sending` -> `DevIo_SimpleWrite`
+    // 100 ms spaeter), im mCCU-Mitschnitt plante die CCU Empfangszeit + 0x69 ms.
+    // Das Geraet wiederholte nach gut 200 ms (Mitschnitt in 200-ms-Bloecken).
+    // Ist die Quittung aelter als kAutoAckLateMs (Wartezeit an der Slot-Sperre
+    // oder an mtx_ davor), entfaellt sie: die Wiederholung des Geraets kommt
+    // dann ohnehin und wird rechtzeitig quittiert. rx_us ist die Lesezeit; ein
+    // Rahmen, der waehrend dieser Wartezeit eintrifft, wird erst danach gelesen
+    // und so zu spaet quittiert (Folgepunkt Review 0204 N2).
+    // Waehrenddessen steht der RX-Task samt Heartbeat (recover_rx_): ein
+    // weiterer Rahmen bleibt im FIFO (der Chip geht danach in IDLE, MCSM1 =
+    // 0x33) und wird danach gelesen, ein dritter in diesen bis ~250 ms ginge
+    // verloren. Das Geraet, dem die Quittung gilt, sendet in dieser Zeit nicht.
+    // RfManager::tx nimmt Slot- und Chipsperre; der RX-Task haelt hier keine
+    // (AskSinRF::drain_fifo gibt die Chipsperre vor dem Callback frei). Die
+    // Slot-Sperre wartet nur bis kAutoAckLateMs, nicht 3 s (Review 0203 F4).
+    const uint8_t flags = wakeup ? (0x80 | BIDCOS_FLAG_WKUP) : 0x80;
+    auto age_ms = [rx_us] {
+        return (static_cast<uint32_t>(esp_timer_get_time()) - rx_us) / 1000u;
+    };
+    if (const uint32_t a = age_ms(); a < kAutoAckDelayMs) {
+        // vTaskDelay(n) dauert bei 100 Hz 10*(n-1)..10*n ms; ein Tick mehr und
+        // aufgerundet, damit es nie weniger als die Restzeit wird (Review 0204 N1).
+        vTaskDelay(pdMS_TO_TICKS(kAutoAckDelayMs - a + 9) + 1);
+    }
+    const uint32_t age = age_ms();
+    if (age >= kAutoAckLateMs) {
+        ESP_LOGW(TAG, "auto-ACK %02X%02X%02X cnt %02X skipped, %u ms late",
+                 m[4], m[5], m[6], m[1], static_cast<unsigned>(age));
+        return;
+    }
+    AskSinTxFrame f{};
+    f.len = 0x0A;
+    const uint8_t frame[] = {0x0A, m[1], flags, BIDCOS_TYPE_ACK,
+                             own[0], own[1], own[2], m[4], m[5], m[6], 0x00};
+    std::memcpy(f.data, frame, sizeof(frame));
+    const esp_err_t e = services_.rf_manager->tx(ProtocolId::AskSin, &f, sizeof(f),
+                                                 kAutoAckLateMs - age);
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "auto-ACK %02X%02X%02X cnt %02X: %s",
+                 m[4], m[5], m[6], m[1], esp_err_to_name(e));
+    }
+}
+
 void HmuartlgwFrontend::on_asksin_rx_(const RxEvent& ev) {
     auto* af = static_cast<const AskSinFrame*>(ev.payload);
     if (!af || af->len < 9) return;     // < flags+mtype+src+dst+...
@@ -892,7 +1123,7 @@ void HmuartlgwFrontend::on_asksin_rx_(const RxEvent& ev) {
             out.payload.push_back(0x00);  // status=0x00 (kein AES)
         }
         out.payload.push_back(0x00);          // info = unsolicited
-        out.payload.push_back(af->rssi_raw);
+        out.payload.push_back(hmu_rssi(af->rssi_raw));
         out.payload.insert(out.payload.end(), af->data + 1, af->data + 1 + af->len);
         return out;
     };
@@ -922,6 +1153,13 @@ void HmuartlgwFrontend::on_asksin_rx_(const RxEvent& ev) {
         const auto& bytes = (mode == ModuleMode::Dual) ? bytes_dual : bytes_legacy;
         sp->write(std::span<const uint8_t>(bytes.data(), bytes.size()));
     }
+
+    // Erst danach quittieren: die Quittung darf ohnehin erst kAutoAckDelayMs
+    // nach dem Empfang raus (siehe auto_ack_), die Hosts bekommen den Rahmen
+    // so ohne diese Wartezeit. FHEM sendet nach einem Rahmen mit
+    // Quittungswunsch fruehestens 300 ms spaeter an dasselbe Geraet
+    // (00_HMUARTLGW.pm nextSend), die Quittung liegt davor.
+    auto_ack_(*af, ev.timestamp_us);
 }
 
 // ============================================================================

@@ -478,13 +478,16 @@ void SignalduinoRF::finalize_frame_(Pattern* pats, int npat,
     int mstart = 0;
     int sync_idx = get_sync(pats, npat, clock_idx, data, dlen, mstart);
 
-    // 4. RSSI-Snapshot
+    // 4. RSSI-Snapshot. `R=` traegt das ROHE Statusregister wie die Referenz-
+    // Firmware (signalDecoder.cpp: rssiValue = _rssiCallback() = cc1101::
+    // getRSSI(), ungerechnet ausgegeben); FHEM rechnet daraus selbst
+    // (00_SIGNALduino.pm SIGNALduino_calcRSSI: >= 128 ? (r-256)/2-74 : r/2-74).
+    // Bis 0.2.2 stand hier der Betrag eines dBm-Werts, fuer Rohwerte < 0x80
+    // noch mit "+64" gerechnet — FHEM machte daraus z. B. -63 statt -42 dBm
+    // (0x41) oder -31 statt -85 dBm (0x96). Der dBm-Wert bleibt fuer ?stats.
     uint8_t rssi_raw = 0;
     if (drv_) drv_->read_status(REG_RSSI, rssi_raw);
-    int8_t raw_signed = static_cast<int8_t>(rssi_raw);
-    int rssi_dbm = (raw_signed < 0) ? (raw_signed / 2 - 74) : (raw_signed / 2 + 64 - 74);
-    if (rssi_dbm < -128) rssi_dbm = -128;
-    if (rssi_dbm > 127)  rssi_dbm =  127;
+    const int rssi_dbm = cc1101_rssi_dbm(rssi_raw);
 
     // 5. Output rendern in frame_.ascii (Class-Member, kein Stack-Frame).
     char* w = frame_.ascii;
@@ -525,9 +528,8 @@ void SignalduinoRF::finalize_frame_(Pattern* pats, int npat,
                     w[used++] = static_cast<char>('0' + data[mstart + i]);
                 }
             }
-            used += snprintf(w + used, cap - used, ";CP=%d;SP=%d;R=%d;",
-                             clock_idx, sync_idx,
-                             rssi_dbm < 0 ? -rssi_dbm : rssi_dbm);
+            used += snprintf(w + used, cap - used, ";CP=%d;SP=%d;R=%u;",
+                             clock_idx, sync_idx, static_cast<unsigned>(rssi_raw));
         }
     }
 
@@ -547,8 +549,8 @@ void SignalduinoRF::finalize_frame_(Pattern* pats, int npat,
                 w[used++] = static_cast<char>('0' + data[i]);
             }
         }
-        used += snprintf(w + used, cap - used, ";CP=%d;R=%d;",
-                         clock_idx, rssi_dbm < 0 ? -rssi_dbm : rssi_dbm);
+        used += snprintf(w + used, cap - used, ";CP=%d;R=%u;",
+                         clock_idx, static_cast<unsigned>(rssi_raw));
     }
 
     if (used >= cap) used = cap - 1;

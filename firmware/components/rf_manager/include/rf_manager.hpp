@@ -46,8 +46,10 @@ public:
     using RxCallback = std::function<void(const RxEvent&)>;
     void subscribe(ProtocolId proto, RxCallback cb);
 
-    // TX-Routing.
-    esp_err_t tx(ProtocolId proto, const void* typed_payload, size_t size);
+    // TX-Routing. lock_timeout_ms begrenzt das Warten auf die Slot-Sperre;
+    // eine Quittung, die erst nach Hunderten ms raus koennte, ist wertlos.
+    esp_err_t tx(ProtocolId proto, const void* typed_payload, size_t size,
+                 uint32_t lock_timeout_ms = CC1101Slot::kOpTimeoutMs);
 
     // Lookup-Helfer fuer Frontends.
     std::shared_ptr<RfProtocol> find_protocol(ProtocolId proto) const;

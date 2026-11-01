@@ -41,6 +41,9 @@ public:
     // NICHT genommen wird sie in den RX-Tasks: deren Rueckruf kann ueber TCP
     // mit portMAX_DELAY blockieren, und eine dort gehaltene Sperre wuerde
     // `activate()` unbegrenzt aufhalten. Die RX-Seite bleibt beim Flag-Gating.
+    // Einzige Ausnahme seit 0.2.3: die Selbstquittung des HMUARTLGW-Frontends
+    // sendet aus dem AskSin-RX-Task ueber RfManager::tx, mit kurzer Frist und
+    // nur fuer die Dauer der Sendung, nie ueber einen Transport-Aufruf hinweg.
     //
     // Rekursiv, damit ein spaeterer Pfad, der unter der Sperre erneut eine
     // Slot-Operation ruft, nicht gegen sich selbst laeuft.
