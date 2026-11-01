@@ -42,6 +42,15 @@ constexpr uint8_t MARC_TXFIFO_UNDERFLOW  = 0x16;
 
 // a-culfw ASKSIN_WAIT_TICKS_CCA = 188 @ 125 Hz Tick = ~1.504 s.
 constexpr uint32_t CCA_TIMEOUT_MS = 1500;
+// 4 Byte Praeambel aus MDMCFG1 (NUM_PREAMBLE = 2), 0,8006 ms je Byte.
+constexpr uint32_t kNomPreambleUs = 3202;
+// Abgleich des Sendezeitpunkts: um so viel kommt STX vor dem Soll. Mit 0
+// lagen 35 Selbstquittungen auf der Luft 124,220..124,260 ms nach dem
+// Rahmenstart (Spanne 40 µs, Standardabweichung 8 µs; HackRF 01.11.2026,
+// Rahmenstart = Sync minus 4 Byte, auf beiden Seiten gleich gerechnet), mit
+// 235 im Median bei 124,0 ms. Darin stecken der Weg vom
+// STX bis zum Traeger und die Lage der GDO2-Flanke hinter dem CRC.
+constexpr uint32_t kStxLeadUs = 235;
 
 // Wie oft der RX-Task ohne GDO2-Meldung nachsieht, ob der Chip in IDLE steht.
 // CRC_AUTOFLUSH (PKTCTRL1 0x0C) verwirft ein Paket mit CRC-Fehler, danach folgt
@@ -114,9 +123,66 @@ const CC1101Profile& AskSinRF::profile() const {
 
 void IRAM_ATTR AskSinRF::gdo2_isr(void* arg) {
     auto* self = static_cast<AskSinRF*>(arg);
+    // IOCFG2 = 0x07: die Flanke kommt mit CRC OK am Paketende. Ihr Zeitpunkt
+    // ist der Bezug fuer die HMU-Selbstquittung; die Lesezeit danach haengt
+    // davon ab, wann der Task drankommt (esp_timer_get_time liegt im IRAM,
+    // CONFIG_ESP_TIMER_IN_IRAM). Steht noch eine unverbrauchte Flanke, bleibt
+    // sie: sie gehoert zum aelteren Rahmen, der zuerst gelesen wird. Ein
+    // juengerer Rahmen in derselben Runde bekommt dann die Lesezeit statt der
+    // Flanke seines Vorgaengers (Review 0206 F1: nach einer Quittung steht der
+    // Chip per TXOFF_MODE = RX wieder auf Empfang, waehrend der vorige Rahmen
+    // noch im FIFO liegt).
+    const uint32_t t = static_cast<uint32_t>(esp_timer_get_time());
+    uint32_t none = 0;
+    self->gdo2_edge_us_.compare_exchange_strong(none, t ? t : 1u, std::memory_order_relaxed);
     BaseType_t hpw = pdFALSE;
     vTaskNotifyGiveFromISR(static_cast<TaskHandle_t>(self->task_handle_), &hpw);
     portYIELD_FROM_ISR(hpw);
+}
+
+void AskSinRF::wait_cb_(void* arg) {
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(arg));
+}
+
+void AskSinRF::sleep_until_(uint32_t t_us) {
+    auto rem = [t_us] {
+        return static_cast<int32_t>(t_us - static_cast<uint32_t>(esp_timer_get_time()));
+    };
+    int32_t r = rem();
+    if (r <= 0) return;
+    // Grob im Tick: vTaskDelay(n) dauert bei 100 Hz 10*(n-1)..10*n ms, also
+    // spaetestens 10 ms vor dem Ziel wach.
+    if (r > 20'000) {
+        vTaskDelay(static_cast<TickType_t>((r / 1000 - 10) / 10));
+        r = rem();
+        if (r <= 0) return;
+    }
+    // Fein ueber einen esp_timer (Task-Dispatch, Prio 22): der Wartende wacht
+    // im Bereich von Mikrosekunden nach dem Ziel auf, statt bis zu 10 ms
+    // spaeter am naechsten Tick. Angelegt beim ersten Gebrauch (auch fuer
+    // bind_for_tx ohne start()).
+    if (!wait_sem_) wait_sem_ = xSemaphoreCreateBinary();
+    if (wait_sem_ && !wait_tmr_) {
+        esp_timer_create_args_t a{};
+        a.callback        = &AskSinRF::wait_cb_;
+        a.arg             = wait_sem_;
+        a.dispatch_method = ESP_TIMER_TASK;
+        a.name            = "asksin-at";
+        if (esp_timer_create(&a, &wait_tmr_) != ESP_OK) wait_tmr_ = nullptr;
+    }
+    if (r < 200 || !wait_tmr_) {
+        // Unter 200 µs lohnt der Umweg nicht; ohne Timer (kein Speicher) aktiv.
+        ets_delay_us(static_cast<uint32_t>(r));
+        return;
+    }
+    xSemaphoreTake(wait_sem_, 0);                     // alte Gabe verwerfen
+    if (esp_timer_start_once(wait_tmr_, static_cast<uint64_t>(r)) != ESP_OK) {
+        ets_delay_us(static_cast<uint32_t>(r));
+        return;
+    }
+    if (xSemaphoreTake(wait_sem_, pdMS_TO_TICKS(r / 1000) + 2) != pdTRUE) {
+        esp_timer_stop(wait_tmr_);
+    }
 }
 
 void AskSinRF::rx_task_trampoline(void* arg) {
@@ -134,6 +200,7 @@ void AskSinRF::drain_fifo() {
     for (int i = 0; i < CC1101Driver::kRxFramesPerDrain; ++i) {
         AskSinFrame frame{};
         uint8_t rssi = 0, lqi = 0;
+        uint32_t t_end = 0;     // Paketende (esp_timer, untere 32 Bit)
         {
             // Lesen samt Flush (Overflow; Resync und stehendes CRC_OK in
             // read_rx_packet strobben SIDLE + SFRX) und das SRX danach nur mit
@@ -149,8 +216,37 @@ void AskSinRF::drain_fifo() {
             if (!drv_->rx_state_safe()) break;
             const auto r = drv_->read_rx_packet({frame.data, AskSinFrame::kMaxPayload},
                                                 rssi, lqi, i == 0);
-            if (r == CC1101Driver::RxPacket::Overflow) { drv_->flush_rx(); break; }
-            if (r != CC1101Driver::RxPacket::Frame)    break;   // Empty/Busy/Error; Resync ist geflusht
+            if (r != CC1101Driver::RxPacket::Frame) {
+                // Die Flanke eines verworfenen Pakets darf keinem spaeteren
+                // Rahmen als Ende zugerechnet werden: weg mit ihr bei Overflow,
+                // Resync und beim leeren FIFO im ersten Lesen (dann gehoert sie
+                // zu keinem Rahmen mehr, z. B. ein CRC-OK-Rahmen, den
+                // CRC_AUTOFLUSH mit dem naechsten fehlerhaften Paket geraeumt hat,
+                // siehe clear_stale_rx_signal). Bei Busy, Error und Empty in einer
+                // Folgerunde bleibt sie: dort gehoert sie zum Rahmen im FIFO oder
+                // zum Paket, das gerade einlaeuft.
+                if (r == CC1101Driver::RxPacket::Overflow ||
+                    r == CC1101Driver::RxPacket::Resync ||
+                    (r == CC1101Driver::RxPacket::Empty && i == 0)) {
+                    gdo2_edge_us_.store(0, std::memory_order_relaxed);
+                }
+                if (r == CC1101Driver::RxPacket::Overflow) drv_->flush_rx();
+                break;                                         // Empty/Busy/Error; Resync ist geflusht
+            }
+            // Paketende = die GDO2-Flanke dieses Rahmens. Fehlt sie (verpasst,
+            // Lesen aus dem Heartbeat, zweiter Rahmen derselben Runde), gilt die
+            // Lesezeit. Ein Rahmen, der ankommt, waehrend der Task im Callback
+            // wartet (HMU-Selbstquittung), behaelt so sein echtes Ende. Eine alte
+            // Flanke bleibt alt: lag der Rahmen lange im FIFO (die Chipsperre
+            // war z. B. fuer einen Burst belegt), verwirft auto_ack_ die
+            // Quittung als verspaetet, statt sie nutzlos spaet zu senden (Review
+            // 0206 F2; bis dahin galt ab 300 ms die Lesezeit). Die 10 s fangen
+            // nur Unsinn ab (32-Bit-Zaehler, Ueberlauf nach ~71 min).
+            {
+                const uint32_t t_read = static_cast<uint32_t>(esp_timer_get_time());
+                const uint32_t edge   = gdo2_edge_us_.exchange(0, std::memory_order_relaxed);
+                t_end = (edge && t_read - edge < 10'000'000u) ? edge : t_read;
+            }
 
             // Frequenzoffset-Schaetzung mitnehmen — nur frame-synchron belastbar
             // (SWRS061I §14.1). Speist `?rf.freqest` / `?rf.freqcal=apply`. Muss VOR
@@ -197,6 +293,9 @@ void AskSinRF::drain_fifo() {
                 .rssi_dbm     = static_cast<int8_t>(rssi),
                 .timestamp_us = static_cast<uint32_t>(esp_timer_get_time()),
                 .payload      = &frame,
+                // Rahmenstart, wie ihn ein CC1101-Empfaenger zurueckrechnet.
+                // air_us() gilt fuer 9993 Bd; im FUP-Profil (AR) unbekannt.
+                .air_start_us = update_mode_ ? 0u : ((t_end - air_us(len)) | 1u),
             };
             rx_cb_(ev);
         }
@@ -243,7 +342,10 @@ void AskSinRF::recover_rx_(bool heartbeat) {
     const bool stuck = (ms == MARC_IDLE || ms == MARC_RXFIFO_OVERFLOW);
     if (!heartbeat && !stuck) return;              // der haeufige Fall: RX laeuft
     // Heartbeat (a-culfw rf_asksin.c:206ff: RXFIFO_OVERFLOW oder IDLE -> SRX).
-    if (ms == MARC_RXFIFO_OVERFLOW) drv_->strobe(SFRX);
+    if (ms == MARC_RXFIFO_OVERFLOW) {
+        drv_->strobe(SFRX);
+        gdo2_edge_us_.store(0, std::memory_order_relaxed);   // Rahmen mit geflusht
+    }
     // Liegt ein fertiger Rahmen im FIFO, den keine Flanke gemeldet hat (oder
     // steht GDO2 noch), liest ihn drain_fifo(). Es nimmt die Sperre selbst und
     // gibt sie vor dem Callback frei, der bis in den Transport reicht; es
@@ -358,6 +460,17 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
     MtxGuard lk(chip_mtx_, pdMS_TO_TICKS(100));
     if (!lk.held) ESP_LOGW(TAG, "tx: Chipsperre belegt, sende ungesperrt");
 
+    // 0) Sendezeitpunkt (HMU-Selbstquittung). tx_at_us ist der nominelle
+    // Rahmenstart = Sync minus 4 Byte. Der Sync folgt dem STX nach
+    // max(4 Byte, Zusatzpraeambel); STX kommt deshalb um die Zusatzpraeambel
+    // ueber 4 Byte hinaus frueher. Gewartet wird unter der Sperre, damit kein
+    // anderer Sender und kein Flush des RX-Tasks den Zeitpunkt verschiebt.
+    const uint32_t extra_us = (ctl_clear & 0x10) ? 0u : f->extra_preamble_ms * 1000u;
+    if (f->tx_at_us) {
+        const uint32_t lead = (extra_us > kNomPreambleUs ? extra_us - kNomPreambleUs : 0u) + kStxLeadUs;
+        sleep_until_(f->tx_at_us - lead);
+    }
+
     // 1) CCA-Loop: STX strobe bis MARCSTATE==TX, Timeout 1.5 s.
     // a-culfw asksin_send macht hier KEINEN Pre-Flight-Check (chip kann in
     // IDLE/RX/sonstigem stecken). CCA-Mode=11 sorgt dafuer dass STX aus RX
@@ -365,7 +478,9 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
     // Datenblatt direkt nach TX. Beide Faelle abgedeckt.
     uint8_t ms;
     int64_t t0 = esp_timer_get_time();
+    uint32_t t_stx = 0;
     while (true) {
+        t_stx = static_cast<uint32_t>(esp_timer_get_time());
         drv_->strobe(STX);
         ms = marc_state(*drv_);
         if (ms == MARC_TX) break;
@@ -377,10 +492,21 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
             drv_->strobe(SIDLE); drv_->strobe(SRX);
             return ESP_ERR_TIMEOUT;
         }
-        // 1 Tick = 10 ms (a-culfw pollt mit ~8 ms). pdMS_TO_TICKS(8) ist bei
-        // CONFIG_FREERTOS_HZ=100 ganzzahlig 0: bis 0.2.0 lief die CCA-Schleife
-        // bis zu 1,5 s, ohne zu blockieren (wie wmbus_rf.cpp, Review 0201 F2).
-        vTaskDelay(1);
+        // a-culfw (rf_asksin.c:256ff) strobt ohne Pause erneut. Hier die ersten
+        // 30 ms alle 0,5 ms ueber den esp_timer (ohne aktives Warten), danach
+        // je Tick (10 ms; pdMS_TO_TICKS(8) waere bei 100 Hz 0, bis 0.2.0 lief
+        // die Schleife so bis zu 1,5 s ohne zu blockieren, Review 0201 F2).
+        // Bis 0.2.5 wartete schon der erste Fehlversuch einen Tick. Mit dieser
+        // Tick-Wartezeit gemessen 01.11.2026: in 108 Selbstquittungen meldete
+        // das CCA zweimal belegt (CARRIER_SENSE_ABS_THR 0), ohne dass die HackRF
+        // daneben einen anderen Sender sah; die Quittung kam 10,5 bzw. 20 ms
+        // spaeter. Mit 0,5 ms zwischen den Versuchen lag danach die spaeteste
+        // von 72 Quittungen 6,9 ms ueber dem Soll.
+        if (elapsed < 30) {
+            sleep_until_(static_cast<uint32_t>(esp_timer_get_time()) + 500u);
+        } else {
+            vTaskDelay(1);
+        }
     }
 
     // 2) Sendezeit in den Sendekredit buchen, ohne je abzulehnen (Dirk
@@ -391,20 +517,24 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
     // Einheit 10 ms wie credit_10ms; der Rest unter 10 ms wandert in die
     // naechste Sendung. Bis 0.2.2 rundete jede Sendung auf, eine Quittung
     // (23 ms) kostete 30 ms (tsculfw fuehrt dafuer Subcredits).
-    const uint32_t air_ms = ((ctl_clear & 0x10) ? 360u : 10u) + ((f->len + 7u) * 8u) / 10u;
+    const uint32_t pre_ms = (ctl_clear & 0x10) ? 360u
+                          : (f->extra_preamble_ms > 3u ? f->extra_preamble_ms : 3u);
+    const uint32_t air_ms = pre_ms + ((f->len + 7u) * 8u) / 10u;
     const uint32_t due_ms = air_ms + air_rest_ms_;
     const uint16_t air10  = static_cast<uint16_t>(due_ms / 10u);
     air_rest_ms_          = static_cast<uint8_t>(due_ms % 10u);
     RfStats::instance().consume_floor(air10);
 
-    // 3) BURST-Preamble. a-culfw rf_asksin.c:271ff:
-    //   - ctl & 0x10 (Bit 4): 360 ms Preamble (3 * 120 ms — uint8 Loop-Limit).
-    //   - sonst:               10 ms.
-    // Waehrend dieser Zeit ist Chip in TX und sendet Preamble + Sync continuously.
+    // 3) Praeambel bis zum FIFO-Schreiben, gemessen ab dem STX, das gegriffen
+    // hat. a-culfw rf_asksin.c:271ff: Burst-Bit (ctl & 0x10) 360 ms, sonst
+    // 10 ms (extra_preamble_ms, Vorgabe 10; der HMU-Pfad nimmt 0 wie die
+    // echten eQ-3-Sender). Bis 0.2.5 war das vTaskDelay(pdMS_TO_TICKS(10)) =
+    // ein Tick bei 100 Hz, also 0..10 ms je nach Tickphase (auf der Luft
+    // 3,3..10,5 ms vom Traegerstart bis zum Sync).
     if (ctl_clear & 0x10) {
-        vTaskDelay(pdMS_TO_TICKS(360));
-    } else {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        sleep_until_(t_stx + 360'000u);
+    } else if (extra_us) {
+        sleep_until_(t_stx + extra_us);
     }
 
     // 4) FIFO-Write: encrypted msg, len+1 bytes (Length-Byte mit gesendet).
@@ -526,6 +656,9 @@ esp_err_t AskSinRF::start(uint8_t slot_id, CC1101Driver& drv) {
 
     ESP_LOGI(TAG, "started on slot %u (status=0x%02x)", slot_id, drv.last_status());
 
+    // Eine Flanke aus der Zeit vor SRES gehoert zu keinem Rahmen mehr; mit
+    // "aelteste Flanke gewinnt" (gdo2_isr) blockierte sie sonst die naechste.
+    gdo2_edge_us_.store(0, std::memory_order_relaxed);
     enabled_ = true;   // ab hier darf der RX-Task ans Radio
     // Aus dem Sekundentakt des deaktivierten Tasks in den 10-ms-Takt holen.
     if (task_handle_) xTaskNotifyGive(static_cast<TaskHandle_t>(task_handle_));
@@ -547,6 +680,7 @@ esp_err_t AskSinRF::stop() {
     // lief ein strobe() auf einen geloeschten Zeiger.  Gegated wird ueber das Flag.
     enabled_ = false;
     if (drv_) drv_->strobe(SIDLE);
+    gdo2_edge_us_.store(0, std::memory_order_relaxed);
     return ESP_OK;
 }
 

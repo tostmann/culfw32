@@ -144,12 +144,14 @@ private:
     void     peer_remove_(const uint8_t* id);           // dito
     HmuFrame build_peer_reply_(const HmuFrame& req, bool added) const;
     // Rahmen an die eigene HMID mit Quittungswunsch von einem eingetragenen
-    // Peer quittieren, fruehestens kAutoAckDelayMs nach dem Lesen des Rahmens
-    // (rx_us), spaetestens bis kAutoAckLateMs, sonst gar nicht. Laeuft im
-    // AskSin-RX-Task, ohne mtx_, nach der Weitergabe an die Hosts.
-    static constexpr uint32_t kAutoAckDelayMs = 100;
+    // Peer quittieren: die Quittung beginnt (nominell) kAutoAckStartUs nach dem
+    // Start des Rahmens (air_start_us). Ist er vor dem Warten an der Slot-Sperre
+    // schon kAutoAckLateMs alt, entfaellt sie; das Warten selbst ist auf diese
+    // Frist begrenzt, CCA danach nicht.
+    // Laeuft im AskSin-RX-Task, ohne mtx_, nach der Weitergabe an die Hosts.
+    static constexpr uint32_t kAutoAckStartUs = 124'000;
     static constexpr uint32_t kAutoAckLateMs  = 200;
-    void     auto_ack_(const struct AskSinFrame& af, uint32_t rx_us);
+    void     auto_ack_(const struct AskSinFrame& af, uint32_t air_start_us);
 
     // RX-Subscription auf AskSinRF — wrappt RxEvent als APP_RECV Frame und
     // broadcastet an alle aktuellen HMUARTLGW-Transports.

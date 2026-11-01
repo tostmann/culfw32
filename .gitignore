@@ -61,6 +61,7 @@ test/rmt_idle_2026-08-29/
 test/pa_2026-09-03/
 test/pa_2026-09-07/
 test/protomatrix_2026-10-08/
+test/hmu_acktime_2026-11-01/
 
 # Product photos, stored locally — not part of the firmware sources
 /pics/

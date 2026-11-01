@@ -924,6 +924,9 @@ HmuFrame HmuartlgwFrontend::handle_app_send_(const HmuFrame& req) {
     AskSinTxFrame f{};
     f.len     = static_cast<uint8_t>(blen);
     f.data[0] = static_cast<uint8_t>(blen);
+    // 4 Byte Praeambel wie die echten eQ-3-Sender (RFUSB, Geraete; HackRF
+    // 01.11.2026), nicht die 10 ms von a-culfw. Burst-Rahmen behalten 360 ms.
+    f.extra_preamble_ms = 0;
     std::memcpy(f.data + 1, body, blen);
 
     // Slot-0 ggf. neu auf AskSin schalten falls anderer Frontend (ASCII `Zr`/
@@ -1008,7 +1011,7 @@ HmuFrame HmuartlgwFrontend::build_peer_reply_(const HmuFrame& req, bool added) c
     return out;
 }
 
-void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t rx_us) {
+void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) {
     // Regeln wie die mCCU-Bruecke (`_selbst_quittieren`, gegen FHEM und einen
     // echten Aktor getestet): nur mit Quittungswunsch, nur an die eigene HMID,
     // nur von eingetragenen Peers. Nicht quittiert werden 0x02 (Quittung),
@@ -1044,35 +1047,47 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t rx_us) {
     // haelt das Geraet wach (AskSinPP Message.h WKUP = 0x01 "keep the device
     // awake", Device.h: stayAwake 500 ms), bis 0.2.2 schlief es nach der
     // Quittung sofort wieder ein und FHEMs Befehle liefen ins Leere.
-    // Zeitpunkt: 100..120 ms nach dem Rahmen, nicht sofort. Gemessen
-    // 01.11.2026 an einem HM-TC-IT-WM-W-EU (getConfig ueber FHEM): Quittungen
-    // ~12 ms und ~60 ms nach seinem Rahmen ignorierte er (dreimal wiederholt,
-    // RESPONSE TIMEOUT), mit 81..100 ms nahm er 42 von 42 an. FHEM ueber einen
-    // CUL quittiert ~110 ms danach (im FHEM-Log: `sending` -> `DevIo_SimpleWrite`
-    // 100 ms spaeter), im mCCU-Mitschnitt plante die CCU Empfangszeit + 0x69 ms.
-    // Das Geraet wiederholte nach gut 200 ms (Mitschnitt in 200-ms-Bloecken).
-    // Ist die Quittung aelter als kAutoAckLateMs (Wartezeit an der Slot-Sperre
-    // oder an mtx_ davor), entfaellt sie: die Wiederholung des Geraets kommt
-    // dann ohnehin und wird rechtzeitig quittiert. rx_us ist die Lesezeit; ein
-    // Rahmen, der waehrend dieser Wartezeit eintrifft, wird erst danach gelesen
-    // und so zu spaet quittiert (Folgepunkt Review 0204 N2).
+    // Zeitpunkt: Rahmenstart + 124 ms, Start zu Start, unabhaengig von der
+    // Laenge (Rahmenstart = Sync minus 4 Byte Praeambel). Die eQ-3-Folien
+    // nennen fuer BidCoS 125 ms Antwortzeit. Im tsculfw-Mitschnitt vom
+    // 01.11.2026 (4-ms-Aufloesung) antworteten HM-MOD-RE-8 und HM-SEC-SC-2 mit
+    // 124 ms, der SC-2 gleich bei Anfragen der Laenge 0x0B und 0x13; tsculfw
+    // quittiert ebenso. HackRF 01.11.: HM-TC-IT-WM-W-EU antwortet nach
+    // 129..131 ms, die OCCU ueber eine RFUSB quittiert nach 126,4 ms (Laenge
+    // 14). Zu frueh wird ignoriert: ~12 ms und ~60 ms nach seinem Rahmen nahm
+    // der HM-TC-IT-WM-W-EU nicht an (dreimal wiederholt, RESPONSE TIMEOUT);
+    // mit 124 ms nahm er 8 von 8 Quittungen ohne Wiederholung an. 0.2.5 wartete
+    // 100..120 ms ab der Lesezeit nach dem Rahmenende und sendete 0..10 ms
+    // Praeambel davor: auf der Luft 129..175 ms Start zu Start, mit der Laenge
+    // wachsend; ein HM-SEN-MDIR-SM wiederholte im tsculfw-Mitschnitt nach einer
+    // Quittung bei 156 ms.
+    // air_start_us kommt aus der GDO2-Flanke (Paketende) minus Luftzeit,
+    // AskSinRF::tx wartet den Rest unter der Chipsperre per esp_timer ab.
+    // Ein Rahmen, der waehrend dieser Wartezeit eintrifft, behaelt so seinen
+    // echten Start (seine Flanke; ein weiterer Rahmen in derselben Leserunde
+    // bekommt die Lesezeit, Review 0206 F1) und wird, wenn die Zeit schon um
+    // ist, sofort quittiert.
+    // Ist der Rahmen vor dem Warten an der Slot-Sperre schon kAutoAckLateMs
+    // alt, entfaellt die Quittung: die Wiederholung des Geraets kommt dann
+    // ohnehin und wird rechtzeitig quittiert. Das gilt auch fuer einen Rahmen,
+    // der lange im FIFO lag (seine Flanke bleibt alt, Review 0206 F2).
     // Waehrenddessen steht der RX-Task samt Heartbeat (recover_rx_): ein
     // weiterer Rahmen bleibt im FIFO (der Chip geht danach in IDLE, MCSM1 =
-    // 0x33) und wird danach gelesen, ein dritter in diesen bis ~250 ms ginge
-    // verloren. Das Geraet, dem die Quittung gilt, sendet in dieser Zeit nicht.
+    // 0x33) und wird danach gelesen; ein dritter vor dem STX der Quittung ginge
+    // verloren, nach ihr steht der Chip per TXOFF_MODE = RX wieder auf Empfang.
+    // Das Geraet, dem die Quittung gilt, sendet in dieser Zeit nicht.
     // RfManager::tx nimmt Slot- und Chipsperre; der RX-Task haelt hier keine
     // (AskSinRF::drain_fifo gibt die Chipsperre vor dem Callback frei). Die
     // Slot-Sperre wartet nur bis kAutoAckLateMs, nicht 3 s (Review 0203 F4).
     const uint8_t flags = wakeup ? (0x80 | BIDCOS_FLAG_WKUP) : 0x80;
-    auto age_ms = [rx_us] {
-        return (static_cast<uint32_t>(esp_timer_get_time()) - rx_us) / 1000u;
-    };
-    if (const uint32_t a = age_ms(); a < kAutoAckDelayMs) {
-        // vTaskDelay(n) dauert bei 100 Hz 10*(n-1)..10*n ms; ein Tick mehr und
-        // aufgerundet, damit es nie weniger als die Restzeit wird (Review 0204 N1).
-        vTaskDelay(pdMS_TO_TICKS(kAutoAckDelayMs - a + 9) + 1);
+    auto now_us = [] { return static_cast<uint32_t>(esp_timer_get_time()); };
+    const uint32_t target = air_start_us + kAutoAckStartUs;
+    // Grob vorwarten, bis hoechstens ~20 ms vor dem Ziel: vTaskDelay(n) dauert
+    // bei 100 Hz 10*(n-1)..10*n ms. Den Rest wartet tx() unter der Chipsperre.
+    if (const int32_t r = static_cast<int32_t>(target - now_us()); r > 30'000) {
+        vTaskDelay(static_cast<TickType_t>((r / 1000 - 20) / 10));
     }
-    const uint32_t age = age_ms();
+    const uint32_t age = (now_us() - air_start_us) / 1000u;
     if (age >= kAutoAckLateMs) {
         ESP_LOGW(TAG, "auto-ACK %02X%02X%02X cnt %02X skipped, %u ms late",
                  m[4], m[5], m[6], m[1], static_cast<unsigned>(age));
@@ -1080,6 +1095,8 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t rx_us) {
     }
     AskSinTxFrame f{};
     f.len = 0x0A;
+    f.extra_preamble_ms = 0;            // 4 Byte wie die eQ-3-Sender
+    f.tx_at_us          = target | 1u;  // 0 hiesse "sofort"
     const uint8_t frame[] = {0x0A, m[1], flags, BIDCOS_TYPE_ACK,
                              own[0], own[1], own[2], m[4], m[5], m[6], 0x00};
     std::memcpy(f.data, frame, sizeof(frame));
@@ -1154,12 +1171,13 @@ void HmuartlgwFrontend::on_asksin_rx_(const RxEvent& ev) {
         sp->write(std::span<const uint8_t>(bytes.data(), bytes.size()));
     }
 
-    // Erst danach quittieren: die Quittung darf ohnehin erst kAutoAckDelayMs
-    // nach dem Empfang raus (siehe auto_ack_), die Hosts bekommen den Rahmen
+    // Erst danach quittieren: die Quittung darf ohnehin erst kAutoAckStartUs
+    // nach dem Rahmenstart raus (siehe auto_ack_), die Hosts bekommen den Rahmen
     // so ohne diese Wartezeit. FHEM sendet nach einem Rahmen mit
     // Quittungswunsch fruehestens 300 ms spaeter an dasselbe Geraet
     // (00_HMUARTLGW.pm nextSend), die Quittung liegt davor.
-    auto_ack_(*af, ev.timestamp_us);
+    // Ohne Rahmenstart (sollte AskSin immer liefern) gilt die Lesezeit.
+    auto_ack_(*af, ev.air_start_us ? ev.air_start_us : ev.timestamp_us);
 }
 
 // ============================================================================

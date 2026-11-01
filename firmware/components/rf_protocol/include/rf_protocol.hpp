@@ -62,6 +62,11 @@ struct RxEvent {
     // Puffer, gueltig NUR fuer die Dauer des synchronen Dispatch-Callbacks; wer
     // ihn ueber den Callback hinaus braucht, MUSS kopieren.
     const void* payload;
+    // Geschaetzter Rahmenstart auf der Luft (esp_timer, untere 32 Bit): Sync
+    // minus 4 Byte Praeambel, so wie ein CC1101-Empfaenger ihn zurueckrechnet.
+    // 0 = unbekannt. Bisher setzt ihn nur AskSin im Normalprofil
+    // (HMU-Selbstquittung).
+    uint32_t    air_start_us = 0;
 };
 
 // Schicht 4: Protokoll-Engine. Wrapper um vendored a-culfw-C-Core.

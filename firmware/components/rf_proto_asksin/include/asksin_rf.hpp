@@ -7,6 +7,7 @@
 #include "cc1101_driver.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "esp_timer.h"
 #include <atomic>
 #include <span>
 
@@ -28,6 +29,19 @@ struct AskSinFrame {
 struct AskSinTxFrame {
     uint8_t len;
     uint8_t data[AskSinFrame::kMaxPayload];    // [0]=len, [1..len]=Klartext-Payload
+    // Wartezeit zwischen STX und FIFO-Schreiben ohne Burst-Bit, in ms. Der Chip
+    // sendet so lange Praeambel, mindestens aber die 4 Byte aus MDMCFG1.
+    // a-culfw (rf_asksin.c:276) wartet 10 ms. Echte eQ-3-Sender (RFUSB,
+    // HM-TC-IT, Wettersensor) senden nur die 4 Byte: 3,3 ms vom Traegerstart
+    // bis zum Sync, mit HackRF gemessen am 01.11.2026. Der HMU-Pfad nimmt 0.
+    uint8_t  extra_preamble_ms = 10;
+    // Wenn ungleich 0: nomineller Rahmenstart (Sync minus 4 Byte Praeambel,
+    // esp_timer, untere 32 Bit), zu dem die Sendung beginnen soll. tx() wartet
+    // unter der Chipsperre mit µs-Aufloesung und strobt STX entsprechend
+    // frueher. Liegt der Zeitpunkt schon zurueck, wird sofort gesendet. Nur
+    // ohne Burst-Bit: die 360 ms folgen erst nach dem STX und sind im Vorlauf
+    // nicht eingerechnet (kein Aufrufer braucht das).
+    uint32_t tx_at_us = 0;
 };
 
 class AskSinRF final : public RfProtocol {
@@ -69,6 +83,12 @@ public:
     static void encrypt(uint8_t* msg);
     static void decrypt(uint8_t* msg);
 
+    // Luftzeit eines Rahmens mit Laengenbyte `len` ohne Zusatzpraeambel:
+    // 4 Byte Praeambel + 4 Byte Sync (SYNC_MODE 3) + Laenge + Nutzdaten +
+    // 2 Byte CRC, 0,8006 ms je Byte bei 9993 Bd. Nur das Normalprofil, nicht
+    // das FUP-Profil (AR, ~50 kbit/s).
+    static constexpr uint32_t air_us(uint8_t len) { return (len + 11u) * 8006u / 10u; }
+
     // FUP-Mode (Firmware-Update via OTA fuer HomeMatic-Geraete) — `AR` statt `Ar`.
     // Bei aktivem Mode wird beim naechsten start() zusaetzlich ASKSIN_UPDATE_CFG
     // ueber das normale ASKSIN_CFG drueber geschrieben (hoehere Datarate ~50 kbps,
@@ -97,6 +117,20 @@ private:
     void        recover_rx_(bool heartbeat);   // Chip aus IDLE/Overflow zurueck nach RX
     void        rearm_rx_();         // SRX aus IDLE, aber nicht waehrend tx()
     static void IRAM_ATTR gdo2_isr(void* arg);
+
+    // Bis t_us (esp_timer, untere 32 Bit) warten: grob im 10-ms-Tick, den Rest
+    // ueber einen esp_timer-One-Shot, der wait_sem_ gibt (kein aktives Warten
+    // ueber Millisekunden). Nur aus tx(); setzt eine Sendung zur Zeit je
+    // Instanz voraus (Slot-Sperre in RfManager::tx, dazu in aller Regel die
+    // Chipsperre), denn wait_sem_/wait_tmr_ gibt es einmal.
+    void        sleep_until_(uint32_t t_us);
+    static void wait_cb_(void* arg);
+    SemaphoreHandle_t  wait_sem_ = nullptr;
+    esp_timer_handle_t wait_tmr_ = nullptr;
+
+    // Zeitpunkt der letzten GDO2-Flanke (CRC OK = Paketende), gesetzt in der
+    // ISR, in drain_fifo() beim Lesen verbraucht (0 = keine frische Flanke).
+    std::atomic<uint32_t> gdo2_edge_us_{0};
 
     // Haelt tx() fuer die ganze Sendung; der RX-Task liest, flusht (SIDLE/SFRX)
     // und strobt SRX nur, wenn er ihn ohne Warten bekommt, und gibt ihn vor dem
