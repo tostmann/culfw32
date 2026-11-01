@@ -470,6 +470,15 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
         const uint32_t lead = (extra_us > kNomPreambleUs ? extra_us - kNomPreambleUs : 0u) + kStxLeadUs;
         sleep_until_(f->tx_at_us - lead);
     }
+    // Frist fuer das STX (tx_until_us): abgelaufen heisst nicht senden.
+    auto too_late = [f] {
+        return f->tx_until_us &&
+               static_cast<int32_t>(static_cast<uint32_t>(esp_timer_get_time()) - f->tx_until_us) >= 0;
+    };
+    if (too_late()) {
+        last_tx_err_ = TxError::CcaTimeout;
+        return ESP_ERR_TIMEOUT;
+    }
 
     // 1) CCA-Loop: STX strobe bis MARCSTATE==TX, Timeout 1.5 s.
     // a-culfw asksin_send macht hier KEINEN Pre-Flight-Check (chip kann in
@@ -479,7 +488,31 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
     uint8_t ms;
     int64_t t0 = esp_timer_get_time();
     uint32_t t_stx = 0;
+    // Abbruch (CCA-Timeout oder tx_until_us): Zustand frisch lesen. Steht der
+    // Chip in RX, hat das CCA abgewiesen und er empfaengt womoeglich gerade
+    // einen Rahmen -- dann nichts strobben, sonst schnitte SIDLE den Rahmen ab
+    // (Review 0209 C1; bis 0.2.8 strobte auch der 1,5-s-Pfad immer). Hat er RX
+    // verlassen (STX aus IDLE: Kalibrierung, dann TX mit leerem FIFO), zurueck
+    // nach RX. RX wird einmal nach 50 µs nachgelesen (RX->TX 30,1 µs, SWRS061I
+    // Tab. 34).
+    auto abort_tx = [&]() {
+        uint8_t st = marc_state(*drv_);
+        if (st == MARC_RX) {
+            ets_delay_us(50);
+            st = marc_state(*drv_);
+        }
+        last_tx_err_  = TxError::CcaTimeout;
+        last_tx_marc_ = st;
+        if (st != MARC_RX) {
+            drv_->strobe(SIDLE); drv_->strobe(SRX);
+        }
+        return ESP_ERR_TIMEOUT;
+    };
     while (true) {
+        // Frist vor jedem STX pruefen, nicht erst danach: sonst ginge nach
+        // einer Tick-Wartezeit noch eine Sendung bis ~10 ms nach der Frist
+        // raus (Review 0209 C2).
+        if (too_late()) return abort_tx();
         t_stx = static_cast<uint32_t>(esp_timer_get_time());
         drv_->strobe(STX);
         ms = marc_state(*drv_);
@@ -500,6 +533,14 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
                 if (ms == MARC_TX) break;
             }
             if (ms == MARC_RX) {
+                // Einmal nachlesen: ob MARCSTATE direkt nach einem angenommenen
+                // STX noch RX meldet, sagt das Datenblatt nicht (RX->TX dauert
+                // laut SWRS061I Tab. 34, S. 54, 782/fxosc = 30,1 µs; Review 0208b B3).
+                ets_delay_us(50);
+                ms = marc_state(*drv_);
+                if (ms == MARC_TX) break;
+            }
+            if (ms == MARC_RX) {
                 last_tx_err_  = TxError::CcaTimeout;
                 last_tx_marc_ = ms;
                 return ESP_ERR_NOT_FINISHED;
@@ -507,12 +548,12 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
             // Weder TX noch RX: weiter wie ohne cca_once.
         }
         int64_t elapsed = (esp_timer_get_time() - t0) / 1000;
-        if (elapsed > CCA_TIMEOUT_MS) {
-            last_tx_err_  = TxError::CcaTimeout;
-            last_tx_marc_ = ms;
-            // Aufraeumen: zurueck nach RX.
-            drv_->strobe(SIDLE); drv_->strobe(SRX);
-            return ESP_ERR_TIMEOUT;
+        if (elapsed > CCA_TIMEOUT_MS || too_late()) {
+            // tx_until_us: bis 0.2.8 hatte die Selbstquittung keine Frist in
+            // dieser Schleife und ging nach einem fremden Burst bis zu 1,5 s
+            // spaet raus (Feldlog 01.11.2026: 416 ms statt 124 ms, nachdem ein
+            // zweites IO derselben Zentrale einen Burst sendete).
+            return abort_tx();
         }
         // a-culfw (rf_asksin.c:256ff) strobt ohne Pause erneut. Hier die ersten
         // 30 ms alle 0,5 ms ueber den esp_timer (ohne aktives Warten), danach

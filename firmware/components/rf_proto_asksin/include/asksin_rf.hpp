@@ -47,6 +47,12 @@ struct AskSinTxFrame {
     // der HMU-Sendeauftraege: ist der Kanal belegt, laeuft womoeglich gerade
     // die Antwort ein, und die Wiederholung waere ueberfluessig).
     bool     cca_once = false;
+    // Wenn ungleich 0: spaetester Zeitpunkt fuer das STX (esp_timer, untere
+    // 32 Bit). Ist er erreicht, bevor das CCA den Kanal freigibt, kehrt tx()
+    // mit ESP_ERR_TIMEOUT zurueck, ohne gesendet zu haben (Selbstquittung:
+    // eine Quittung nach der Wiederholung des Geraets nuetzt nichts mehr).
+    // Zusammen mit cca_once gilt cca_once (genau ein Versuch).
+    uint32_t tx_until_us = 0;
     // Ausgabe von tx(): nomineller Rahmenstart der Sendung (Sync minus 4 Byte,
     // esp_timer, untere 32 Bit), gesetzt sobald der Chip sendet.
     mutable uint32_t sent_at_us = 0;

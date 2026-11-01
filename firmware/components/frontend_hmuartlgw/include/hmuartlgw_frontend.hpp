@@ -123,32 +123,33 @@ private:
     void     ensure_asksin_();
 
     // Sendeauftrag (Legacy, APP_SEND mit Quittungswunsch an eine Adresse
-    // ungleich 000000). FHEM (00_HMUARTLGW.pm) kennt als Antwort darauf
-    // `04 03 <info> <rssi> <Antwort>` (ACK_WITH_RESPONSE, derselbe Auswertepfad
-    // wie `05`) und `04 04` (ACK_EUNKNOWN, geloggt als "no response?"); so
-    // antwortet der Stick jetzt, wenn das Geraet geantwortet hat bzw. nicht.
-    // Bis 0.2.7 kam sofort `04 01`, und blieb
-    // die Antwort aus, wiederholte niemand: CUL_HM wartet bei Weck- und
-    // Lazy-Config-Geraeten dann auf deren naechstes Aufwachen (Mitschnitt
-    // 01.11.2026, HM-SEC-SC-2 und HM-SEN-MDIR-SM). Jetzt sendet der Sende-Task,
-    // wartet und wiederholt hoechstens kMaxRetries Mal (Burst-Rahmen gar nicht),
-    // jeweils kRetryAfterUs nach dem Rahmenstart der letzten Sendung (124 ms
-    // Antwortzeit + 128 ms);
-    // nach der letzten wartet er bis kLastWaitUs, langsame Geraete brauchten
-    // fuer eine Liste bis ~470 ms. Jeder Auftrag endet spaetestens nach
-    // kJobDeadlineUs: FHEM sendet nach 10 s (SEND_TIMEOUT) selbst neu und
-    // verwirft ein spaeteres `04` als "delayed ACK" samt Antwort (Review 0208
-    // F2). Ein neues OS_GET_APP/OS_CHANGE_APP des Auftraggebers (FHEM-Init)
-    // verwirft den Auftrag. Die Antwort
-    // erkennt der RX-Pfad (on_asksin_rx_) an Zaehler, Absender und Ziel und
-    // schickt sie dem Auftraggeber als `04 03` statt als `05`. Grenze: Geraete
-    // zaehlen bei mehrteiligen Antworten selbst hoch (HM-TC-IT-WM-W-EU: Teil 2
-    // traegt Zaehler + 1). CUL_HM zaehlt je Nachricht +1, bei Listen-Anfragen
-    // +16 (am 01.11. FA -> 0B). Traegt FHEMs naechste Anfrage den Zaehler von
-    // Teil 2 und kommt vor ihm, gilt Teil 2 als Antwort und die echte Antwort
-    // kommt als `05` -- jeder Rahmen erreicht FHEM trotzdem genau einmal. FHEM
-    // sendet nach einem Rahmen mit Quittungswunsch erst 300 ms spaeter an
-    // dasselbe Geraet (nextSend), Teil 2 lag am 01.11. davor.
+    // ungleich 000000). FHEM (00_HMUARTLGW.pm) kennt als Antwort darauf `04 03
+    // <info> <rssi> <Antwort>` (ACK_WITH_RESPONSE, derselbe Auswertepfad wie
+    // `05`) und `04 04` (ACK_EUNKNOWN, geloggt als "no response?"); so antwortet
+    // der Stick jetzt, wenn das Geraet geantwortet hat bzw. nicht. Bis 0.2.7 kam
+    // sofort `04 01`, und blieb die Antwort aus, wiederholte niemand: CUL_HM
+    // wartet bei Weck- und Lazy-Config-Geraeten dann auf deren naechstes
+    // Aufwachen (Mitschnitt 01.11.2026, HM-SEC-SC-2 und HM-SEN-MDIR-SM). Jetzt
+    // sendet der Sende-Task, wartet und wiederholt hoechstens kMaxRetries Mal
+    // (Burst-Rahmen gar nicht), jeweils kRetryAfterUs nach dem Rahmenstart der
+    // letzten Sendung (124 ms Antwortzeit + 128 ms); nach der letzten wartet er
+    // bis kLastWaitUs, langsame Geraete brauchten fuer eine Liste bis ~470 ms.
+    // Nach kJobDeadlineUs wird nicht mehr wiederholt und ein noch nicht
+    // gesendeter Auftrag mit `04 06` (CSMA/CA) beendet; eine laufende Sendung
+    // und das Antwortfenster danach kommen noch dazu, im Regelfall unter ~6 s,
+    // im Extremfall bis ~8 s. FHEM sendet nach 10 s (SEND_TIMEOUT) selbst neu
+    // und verwirft ein spaeteres `04` als "delayed ACK" samt Antwort (Review
+    // 0208 F2, 0208b B1/B2). Ein neues OS_GET_APP/OS_CHANGE_APP des
+    // Auftraggebers (FHEM-Init) verwirft den Auftrag. Die Antwort erkennt der
+    // RX-Pfad (on_asksin_rx_) an Zaehler, Absender und Ziel und schickt sie dem
+    // Auftraggeber als `04 03` statt als `05`. Grenze: Geraete zaehlen bei
+    // mehrteiligen Antworten selbst hoch (HM-TC-IT-WM-W-EU: Teil 2 traegt
+    // Zaehler + 1). CUL_HM zaehlt je Nachricht +1, bei Listen-Anfragen +16
+    // (10_CUL_HM.pm CUL_HM_SndCmd). Traegt FHEMs naechste Anfrage den Zaehler
+    // von Teil 2 und kommt vor ihm, gilt Teil 2 als Antwort und die echte
+    // Antwort kommt als `05` -- jeder Rahmen erreicht FHEM trotzdem genau
+    // einmal. FHEM sendet nach einem Rahmen mit Quittungswunsch erst 300 ms
+    // spaeter an dasselbe Geraet (nextSend), Teil 2 lag am 01.11. davor.
     struct SendJob {
         bool       active = false;
         uint32_t   gen    = 0;          // zaehlt je Auftrag hoch
@@ -203,9 +204,9 @@ private:
     HmuFrame build_peer_reply_(const HmuFrame& req, bool added) const;
     // Rahmen an die eigene HMID mit Quittungswunsch von einem eingetragenen
     // Peer quittieren: die Quittung beginnt (nominell) kAutoAckStartUs nach dem
-    // Start des Rahmens (air_start_us). Ist er vor dem Warten an der Slot-Sperre
-    // schon kAutoAckLateMs alt, entfaellt sie; das Warten selbst ist auf diese
-    // Frist begrenzt, CCA danach nicht.
+    // Start des Rahmens (air_start_us). Ist sie kAutoAckLateMs nach dem
+    // Rahmenstart nicht gesendet (Wartezeit an der Slot-Sperre oder belegter
+    // Kanal im CCA), entfaellt sie.
     // Laeuft im AskSin-RX-Task, ohne mtx_, nach der Weitergabe an die Hosts.
     static constexpr uint32_t kAutoAckStartUs = 124'000;
     static constexpr uint32_t kAutoAckLateMs  = 200;
