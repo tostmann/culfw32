@@ -484,6 +484,28 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
         drv_->strobe(STX);
         ms = marc_state(*drv_);
         if (ms == MARC_TX) break;
+        if (f->cca_once) {
+            // Abgewiesen hat das CCA nur, wenn der Chip in RX geblieben ist
+            // (SWRS061I Tab. 42, S. 67: "If in RX state and CCA is enabled: Only
+            // go to TX if channel is clear"). Aus IDLE geht STX ohne CCA nach TX,
+            // erst nach der Kalibrierung (FS_AUTOCAL, §19.4) -- dann bis 2 ms
+            // nachlesen statt "belegt" zu melden, waehrend der Chip anlaeuft
+            // (Review 0208 F1).
+            if (ms != MARC_RX) {
+                const int64_t until = esp_timer_get_time() + 2000;
+                while (ms != MARC_TX && ms != MARC_RX && esp_timer_get_time() < until) {
+                    ets_delay_us(100);
+                    ms = marc_state(*drv_);
+                }
+                if (ms == MARC_TX) break;
+            }
+            if (ms == MARC_RX) {
+                last_tx_err_  = TxError::CcaTimeout;
+                last_tx_marc_ = ms;
+                return ESP_ERR_NOT_FINISHED;
+            }
+            // Weder TX noch RX: weiter wie ohne cca_once.
+        }
         int64_t elapsed = (esp_timer_get_time() - t0) / 1000;
         if (elapsed > CCA_TIMEOUT_MS) {
             last_tx_err_  = TxError::CcaTimeout;
@@ -507,6 +529,14 @@ esp_err_t AskSinRF::tx(const void* typed_payload, size_t payload_size) {
         } else {
             vTaskDelay(1);
         }
+    }
+
+    {
+        // Nomineller Start (Sync minus 4 Byte): der Sync folgt dem STX nach
+        // max(4 Byte, Praeambel bis zum FIFO-Schreiben).
+        const uint32_t pre_us = (ctl_clear & 0x10) ? 360'000u : extra_us;
+        f->sent_at_us = (t_stx + (pre_us > kNomPreambleUs ? pre_us - kNomPreambleUs : 0u)
+                         + kStxLeadUs) | 1u;
     }
 
     // 2) Sendezeit in den Sendekredit buchen, ohne je abzulehnen (Dirk

@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
+#include "freertos/task.h"
 #include "nvs_eeprom.hpp"
 #include "culfw_ee_addr.hpp"
 #include <cstdio>
@@ -80,10 +81,12 @@ constexpr uint8_t APP_TRX_GET_MCU_TYPE    = 0x09;  // HB-RF-ETH-spezifisch — e
 constexpr uint8_t ACK             = 0x04;
 constexpr uint8_t ACK_OK          = 0x01;
 constexpr uint8_t ACK_INFO        = 0x02;
+constexpr uint8_t ACK_WITH_RESPONSE = 0x03;   // gesendet, Antwort des Geraets folgt im Rahmen
 constexpr uint8_t ACK_EUNKNOWN    = 0x04;
 constexpr uint8_t ACK_ENOCREDITS  = 0x05;
 constexpr uint8_t ACK_ECSMACA     = 0x06;
 constexpr uint8_t ACK_MULTIPART   = 0x07;
+constexpr uint8_t ACK_EINPROGRESS = 0x08;     // beschaeftigt, FHEM wiederholt nach 50 ms
 
 // BidCoS-Rahmen ab dem Laengenbyte: [0]=LEN [1]=CNT [2]=FLAG [3]=TYP
 // [4..6]=Absender [7..9]=Ziel.
@@ -112,6 +115,7 @@ void HmuartlgwFrontend::attach(const FrontendServices& services) {
     services_ = services;
     if (!mtx_) mtx_ = xSemaphoreCreateMutex();
     if (!peer_mtx_) peer_mtx_ = xSemaphoreCreateMutex();
+    if (!job_mtx_) job_mtx_ = xSemaphoreCreateMutex();
 
     // HMID aus EE laden — falls 0xFFFFFF (noch nie provisioned), bei
     // 0xCAFE42 (Bringup-Default) bleiben damit FHEM einen lesbaren Wert sieht.
@@ -229,6 +233,13 @@ void HmuartlgwFrontend::detach_dynamic_transport(Transport* t) {
             legacy_left = true;
         }
     }
+    // Ein offener Sendeauftrag dieser Verbindung entfaellt (der Sende-Task
+    // hoert dann auf zu wiederholen).
+    if (job_mtx_) {
+        xSemaphoreTake(job_mtx_, portMAX_DELAY);
+        if (job_.active && job_.owner == t) job_.active = false;
+        xSemaphoreGive(job_mtx_);
+    }
     // Ohne Legacy-Verbindung quittiert niemand mehr selbst: ein spaeterer
     // Klient (etwa ein CUL-Device auf 2323) quittiert selbst, eine zweite
     // Quittung waere doppelt. FHEM traegt nach dem naechsten Init neu ein.
@@ -272,6 +283,19 @@ esp_err_t HmuartlgwFrontend::start() {
         }
         services_.rf_manager->subscribe(ProtocolId::AskSin,
             [this](const RxEvent& ev) { on_asksin_rx_(ev); });
+    }
+
+    // Sende-Task fuer Auftraege mit Quittungswunsch (siehe SendJob). Prio 7:
+    // unter dem AskSin-RX-Task (8), der die Antworten liefert, ueber den
+    // Transport-Tasks. 5 KB wie der RX-Task, der auf demselben Weg sendet.
+    if (!send_task_ && job_mtx_) {
+        TaskHandle_t h = nullptr;
+        if (xTaskCreate(&HmuartlgwFrontend::send_task_trampoline_, "hmu-send", 5120,
+                        this, 7, &h) == pdPASS) {
+            send_task_ = h;
+        } else {
+            ESP_LOGW(TAG, "send task not created, APP_SEND answers 04 01 at once");
+        }
     }
 
     ESP_LOGI(TAG, "ready, %u transport(s)", static_cast<unsigned>(transports_.size()));
@@ -351,6 +375,15 @@ void HmuartlgwFrontend::dispatch_(const HmuFrame& req, Transport* src) {
     const ModuleMode mod = pt ? pt->module : module_mode_;
     enum class PostPush { None, BL, App };
     PostPush post_push = PostPush::None;
+    if (req.dst == kHmuDstOs && (req.cmd() == OS_GET_APP || req.cmd() == OS_CHANGE_APP) &&
+        job_mtx_) {
+        // Init des Klienten: ein offener Auftrag gehoert zur alten Sitzung,
+        // ein spaetes `04` daraus schaltete FHEMs Init-Automaten weiter
+        // (Review 0208 F3). mtx_ -> job_mtx_.
+        xSemaphoreTake(job_mtx_, portMAX_DELAY);
+        if (job_.active && job_.owner == src) job_.active = false;
+        xSemaphoreGive(job_mtx_);
+    }
     if (pt && req.dst == kHmuDstOs) {
         if (pt->mode == HostMode::AwaitingProbe) {
             if (req.cmd() == OS_GET_APP) {
@@ -434,7 +467,7 @@ void HmuartlgwFrontend::dispatch_(const HmuFrame& req, Transport* src) {
             (req.cmd() == TRX_GET_MCU_TYPE || req.cmd() == TRX_GET_VERSION)) {
             resp = build_trx_response_(req);
         } else {
-            resp = build_app_response_(req, mod);
+            resp = build_app_response_(req, mod, src);
         }
     } else if (mod == ModuleMode::Dual && req.dst == kHmuDstCommon) {
         resp = build_common_response_(req, mod);
@@ -495,7 +528,9 @@ void HmuartlgwFrontend::dispatch_(const HmuFrame& req, Transport* src) {
              req.dst, req.cnt, req.cmd(),
              resp.payload.empty() ? 0 : resp.payload[0],
              static_cast<unsigned>(resp.payload.size()));
-    send_to_(src, resp);
+    // Ohne Nutzlast: Sendeauftrag, die Antwort schickt spaeter der Sende-Task
+    // bzw. der RX-Pfad (`04 03`/`04 04`).
+    if (!resp.payload.empty()) send_to_(src, resp);
 
     if (post_push == PostPush::App) {
         HmuFrame push = build_app_push_(0, mod);
@@ -778,7 +813,8 @@ HmuFrame HmuartlgwFrontend::build_os_response_(const HmuFrame& req) {
     return out;
 }
 
-HmuFrame HmuartlgwFrontend::build_app_response_(const HmuFrame& req, ModuleMode mod) {
+HmuFrame HmuartlgwFrontend::build_app_response_(const HmuFrame& req, ModuleMode mod,
+                                                Transport* src) {
     HmuFrame out;
     // Antwort auf der gleichen dst-Layer wie der Request, damit multimacd den
     // Reply auf das richtige Mmd-Slave-Device routet (im DualCoPro-Mode kommt
@@ -838,7 +874,7 @@ HmuFrame HmuartlgwFrontend::build_app_response_(const HmuFrame& req, ModuleMode 
             out.payload.insert(out.payload.end(), {ACK, ACK_OK});
             break;
         case APP_SEND:
-            return handle_app_send_(req);
+            return handle_app_send_(req, mod == ModuleMode::Legacy ? src : nullptr);
         case APP_ADD_PEER:
         case APP_REMOVE_PEER: {
             // FHEM: ADD_PEER = [06][id(3)][kNo][wakeup][00], REMOVE_PEER =
@@ -885,7 +921,7 @@ HmuFrame HmuartlgwFrontend::build_app_response_(const HmuFrame& req, ModuleMode 
     return out;
 }
 
-HmuFrame HmuartlgwFrontend::handle_app_send_(const HmuFrame& req) {
+HmuFrame HmuartlgwFrontend::handle_app_send_(const HmuFrame& req, Transport* legacy_src) {
     HmuFrame out;
     out.dst = req.dst;   // mirror — Legacy=APP, Dual=LLMAC.
     out.cnt = req.cnt;
@@ -929,14 +965,36 @@ HmuFrame HmuartlgwFrontend::handle_app_send_(const HmuFrame& req) {
     f.extra_preamble_ms = 0;
     std::memcpy(f.data + 1, body, blen);
 
-    // Slot-0 ggf. neu auf AskSin schalten falls anderer Frontend (ASCII `Zr`/
-    // `Fr` etc.) inzwischen umgeschaltet hat. Defensiv — in der HMUARTLGW-
-    // Domaene gehoert Slot 0 dem AskSin.
-    auto active = services_.rf_manager->active_protocol_on(0);
-    if (!active || active->id() != ProtocolId::AskSin) {
-        services_.rf_manager->activate(ProtocolId::AskSin, 0);
+    // Legacy-Klient, Quittungswunsch, Ziel ungleich 000000: Sendeauftrag.
+    // Body: [0]=CNT [1]=FLAG [2]=TYP [3..5]=Absender [6..8]=Ziel.
+    static constexpr uint8_t kNoAddr[3] = {0, 0, 0};
+    if (legacy_src && send_task_ && job_mtx_ && blen >= 9 &&
+        (body[1] & BIDCOS_FLAG_BIDI) && std::memcmp(body + 6, kNoAddr, 3) != 0) {
+        xSemaphoreTake(job_mtx_, portMAX_DELAY);
+        if (job_.active) {
+            // FHEM schickt waehrend eines offenen Auftrags nichts (es wartet
+            // auf `04`); ein zweiter Legacy-Klient bekommt "beschaeftigt"
+            // und wiederholt nach 50 ms (00_HMUARTLGW.pm EINPROGRESS).
+            xSemaphoreGive(job_mtx_);
+            out.payload.insert(out.payload.end(), {ACK, ACK_EINPROGRESS});
+            return out;
+        }
+        ++job_.gen;
+        job_.active  = true;
+        job_.owner   = legacy_src;
+        job_.hmu_cnt = req.cnt;
+        job_.cnt     = body[0];
+        std::memcpy(job_.src, body + 3, 3);
+        std::memcpy(job_.dst, body + 6, 3);
+        std::memcpy(job_.msg, f.data, static_cast<size_t>(f.len) + 1u);
+        job_.t_start = static_cast<uint32_t>(esp_timer_get_time());
+        xSemaphoreGive(job_mtx_);
+        xTaskNotifyGive(static_cast<TaskHandle_t>(send_task_));
+        out.payload.clear();                 // Antwort kommt spaeter
+        return out;
     }
 
+    ensure_asksin_();
     esp_err_t e = services_.rf_manager->tx(ProtocolId::AskSin, &f, sizeof(f));
     if (e == ESP_OK) {
         out.payload.insert(out.payload.end(), {ACK, ACK_OK});
@@ -951,6 +1009,152 @@ HmuFrame HmuartlgwFrontend::handle_app_send_(const HmuFrame& req) {
         out.payload.insert(out.payload.end(), {ACK, ACK_EUNKNOWN});
     }
     return out;
+}
+
+void HmuartlgwFrontend::ensure_asksin_() {
+    // Slot-0 ggf. neu auf AskSin schalten falls anderer Frontend (ASCII `Zr`/
+    // `Fr` etc.) inzwischen umgeschaltet hat. Defensiv — in der HMUARTLGW-
+    // Domaene gehoert Slot 0 dem AskSin.
+    if (!services_.rf_manager) return;
+    auto active = services_.rf_manager->active_protocol_on(0);
+    if (!active || active->id() != ProtocolId::AskSin) {
+        services_.rf_manager->activate(ProtocolId::AskSin, 0);
+    }
+}
+
+void HmuartlgwFrontend::send_task_trampoline_(void* arg) {
+    static_cast<HmuartlgwFrontend*>(arg)->send_task_loop_();
+    vTaskDelete(nullptr);
+}
+
+void HmuartlgwFrontend::finish_job_(uint32_t gen, std::initializer_list<uint8_t> ack) {
+    Transport* owner = nullptr;
+    uint8_t    cnt   = 0;
+    xSemaphoreTake(job_mtx_, portMAX_DELAY);
+    if (job_.active && job_.gen == gen) {
+        job_.active = false;
+        owner = job_.owner;
+        cnt   = job_.hmu_cnt;
+    }
+    xSemaphoreGive(job_mtx_);
+    if (!owner) return;                      // schon beantwortet oder verworfen
+    // Nur an einen noch verbundenen Transport schreiben (shared_ptr haelt ihn
+    // fuer das write am Leben).
+    std::shared_ptr<Transport> sp;
+    xSemaphoreTake(mtx_, portMAX_DELAY);
+    for (const auto& t : transports_) {
+        if (t.get() == owner) { sp = t; break; }
+    }
+    xSemaphoreGive(mtx_);
+    if (!sp) return;
+    HmuFrame f;
+    f.dst = kHmuDstApp;
+    f.cnt = cnt;
+    f.payload.assign(ack);
+    auto bytes = f.encode();
+    sp->write(std::span<const uint8_t>(bytes.data(), bytes.size()));
+}
+
+void HmuartlgwFrontend::send_task_loop_() {
+    auto now_us = [] { return static_cast<uint32_t>(esp_timer_get_time()); };
+    uint32_t done_gen = 0;
+    for (;;) {
+        // Naechsten offenen Auftrag holen; ohne Auftrag auf die Meldung aus
+        // handle_app_send_ warten.
+        uint32_t gen = 0;
+        uint32_t deadline = 0;
+        AskSinTxFrame f{};
+        xSemaphoreTake(job_mtx_, portMAX_DELAY);
+        const bool have = job_.active && job_.gen != done_gen;
+        if (have) {
+            gen      = job_.gen;
+            deadline = job_.t_start + kJobDeadlineUs;
+            f.len = job_.msg[0];
+            std::memcpy(f.data, job_.msg, static_cast<size_t>(f.len) + 1u);
+        }
+        xSemaphoreGive(job_mtx_);
+        if (!have) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+        done_gen = gen;
+        // 4 Byte Praeambel wie die eQ-3-Sender, Burst-Rahmen behalten 360 ms.
+        f.extra_preamble_ms = 0;
+
+        auto open = [&] {
+            xSemaphoreTake(job_mtx_, portMAX_DELAY);
+            const bool o = job_.active && job_.gen == gen;
+            xSemaphoreGive(job_mtx_);
+            return o;
+        };
+        // Bis t_us warten; true, sobald der Auftrag erledigt ist (der RX-Pfad
+        // hat die Antwort zugestellt und weckt den Task).
+        auto wait_done = [&](uint32_t t_us) {
+            for (;;) {
+                if (!open()) return true;
+                const int32_t r = static_cast<int32_t>(t_us - now_us());
+                if (r <= 0) return false;
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(r / 1000) + 1);
+            }
+        };
+
+        uint32_t last_start = 0;
+        bool     done       = false;
+        int      busy       = 0;
+        auto past = [&](uint32_t t) { return static_cast<int32_t>(t - now_us()) <= 0; };
+        // Burst-Rahmen (Flag 0x10) nur einmal: jede Sendung traegt 360 ms
+        // Praeambel, und CUL_HM wiederholt bei ausbleibender Antwort ohnehin
+        // selbst (am 01.11. an einem stummen Aktor 4 Versuche); mit Wiederholung
+        // im Stick kaeme ein Befehl an ein totes Burst-Geraet auf mehrere
+        // Sekunden Sendezeit (Review 0208 F5, Dirk 01.11.: ohne Wiederholung).
+        const int max_retries = (f.data[2] & 0x10) ? 0 : kMaxRetries;
+        for (int attempt = 0; attempt <= max_retries && !done; ) {
+            if (!open()) { done = true; break; }
+            if (attempt > 0 && past(deadline)) break;      // keine Wiederholung mehr
+            f.cca_once   = attempt > 0;
+            f.sent_at_us = 0;
+            // Ohne mtx_: im Wettlauf mit claim_radio_ schlimmstenfalls eine
+            // doppelte Aktivierung derselben Klasse (harmlos).
+            ensure_asksin_();
+            // Erster Versuch wie bisher (Slot-Sperre bis 3 s), Wiederholungen
+            // nur kurz: ein Auftrag soll FHEMs 10-s-Frist nie erreichen.
+            const esp_err_t e = services_.rf_manager
+                ? services_.rf_manager->tx(ProtocolId::AskSin, &f, sizeof(f),
+                                           attempt > 0 ? kRetryLockMs : CC1101Slot::kOpTimeoutMs)
+                : ESP_ERR_INVALID_STATE;
+            if (e == ESP_ERR_NOT_FINISHED) {
+                // Wiederholung, Kanal belegt: womoeglich laeuft gerade die
+                // Antwort ein. In 20-ms-Schritten neu pruefen, hoechstens
+                // 10 Mal, dann keine weitere Wiederholung.
+                if (wait_done(now_us() + 20'000)) { done = true; break; }
+                if (++busy > 10) break;
+                continue;
+            }
+            if (e != ESP_OK) {
+                if (attempt == 0) {
+                    // Wie bisher: nichts gesendet, FHEM entscheidet (CSMA/CA
+                    // wiederholt es nach 200 ms).
+                    const uint8_t code = (e == ESP_ERR_TIMEOUT) ? ACK_ECSMACA : ACK_EUNKNOWN;
+                    finish_job_(gen, {ACK, code});
+                    done = true;
+                }
+                break;
+            }
+            last_start = f.sent_at_us ? f.sent_at_us : now_us();
+            busy = 0;
+            ++attempt;
+            if (attempt > max_retries) break;
+            if (wait_done(last_start + kRetryAfterUs)) done = true;
+            else ESP_LOGD(TAG, "APP_SEND cnt %02X: no answer, repeat %d", f.data[1], attempt);
+        }
+        if (done) continue;
+        if (last_start) {
+            uint32_t until = last_start + kLastWaitUs;
+            if (static_cast<int32_t>(until - deadline) > 0) until = deadline;
+            if (wait_done(until)) continue;
+        }
+        finish_job_(gen, {ACK, ACK_EUNKNOWN});
+    }
 }
 
 void HmuartlgwFrontend::claim_radio_() {
@@ -1166,7 +1370,39 @@ void HmuartlgwFrontend::on_asksin_rx_(const RxEvent& ev) {
     HmuFrame dual   = build_frame(ModuleMode::Dual,   cnt);
     auto bytes_legacy = legacy.encode();
     auto bytes_dual   = dual.encode();
+
+    // Antwort auf den offenen Sendeauftrag (gleicher Zaehler, vom Ziel an den
+    // Absender, beliebiger Typ: Quittung 02 oder inhaltliche Antwort wie 10)?
+    // Der Auftraggeber bekommt sie genau einmal, als `04 03` unter dem Zaehler
+    // seiner Anfrage -- als `05` dazu saehe FHEM sie doppelt. Die uebrigen
+    // Verbindungen bekommen sie wie jeden Rahmen als `05`.
+    Transport*         answer_to = nullptr;
+    std::vector<uint8_t> bytes_answer;
+    if (job_mtx_ && af->len >= 9) {
+        const uint8_t* m = af->data;
+        xSemaphoreTake(job_mtx_, portMAX_DELAY);
+        if (job_.active && m[1] == job_.cnt &&
+            std::memcmp(m + 4, job_.dst, 3) == 0 && std::memcmp(m + 7, job_.src, 3) == 0) {
+            job_.active = false;
+            answer_to   = job_.owner;
+            HmuFrame a;
+            a.dst = kHmuDstApp;
+            a.cnt = job_.hmu_cnt;
+            a.payload.reserve(4 + af->len);
+            a.payload.insert(a.payload.end(), {ACK, ACK_WITH_RESPONSE, 0x00,
+                                               hmu_rssi(af->rssi_raw)});
+            a.payload.insert(a.payload.end(), af->data + 1, af->data + 1 + af->len);
+            bytes_answer = a.encode();
+        }
+        xSemaphoreGive(job_mtx_);
+        if (answer_to && send_task_) xTaskNotifyGive(static_cast<TaskHandle_t>(send_task_));
+    }
+
     for (auto& [sp, mode] : snapshot) {
+        if (answer_to && sp.get() == answer_to) {
+            sp->write(std::span<const uint8_t>(bytes_answer.data(), bytes_answer.size()));
+            continue;
+        }
         const auto& bytes = (mode == ModuleMode::Dual) ? bytes_dual : bytes_legacy;
         sp->write(std::span<const uint8_t>(bytes.data(), bytes.size()));
     }

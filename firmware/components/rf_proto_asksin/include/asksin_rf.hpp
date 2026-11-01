@@ -42,6 +42,14 @@ struct AskSinTxFrame {
     // ohne Burst-Bit: die 360 ms folgen erst nach dem STX und sind im Vorlauf
     // nicht eingerechnet (kein Aufrufer braucht das).
     uint32_t tx_at_us = 0;
+    // true: genau ein STX-Versuch. Weist das CCA ihn ab, kehrt tx() mit
+    // ESP_ERR_NOT_FINISHED zurueck, ohne gesendet zu haben (Wiederholungen
+    // der HMU-Sendeauftraege: ist der Kanal belegt, laeuft womoeglich gerade
+    // die Antwort ein, und die Wiederholung waere ueberfluessig).
+    bool     cca_once = false;
+    // Ausgabe von tx(): nomineller Rahmenstart der Sendung (Sync minus 4 Byte,
+    // esp_timer, untere 32 Bit), gesetzt sobald der Chip sendet.
+    mutable uint32_t sent_at_us = 0;
 };
 
 class AskSinRF final : public RfProtocol {

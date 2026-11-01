@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include <array>
+#include <initializer_list>
 #include <memory>
 #include <vector>
 
@@ -112,8 +113,65 @@ private:
     HmuFrame build_os_response_(const HmuFrame& req);
     // APP-Layer (Phase 2): APP_SEND → AskSinRF::tx, GET_HMID/SET_HMID; im
     // Legacy-Modus zusaetzlich ADD_PEER/REMOVE_PEER mit Peer-Tabelle.
-    HmuFrame build_app_response_(const HmuFrame& req, ModuleMode mod);
-    HmuFrame handle_app_send_(const HmuFrame& req);
+    // src: der Transport, von dem die Anfrage kommt (fuer Sendeauftraege).
+    HmuFrame build_app_response_(const HmuFrame& req, ModuleMode mod, Transport* src = nullptr);
+    // legacy_src != nullptr: Legacy-Klient; ein Rahmen mit Quittungswunsch
+    // wird dann zum Sendeauftrag (siehe SendJob) und die Antwort kommt spaeter
+    // -- zurueck kommt ein Rahmen ohne Nutzlast ("noch keine Antwort").
+    HmuFrame handle_app_send_(const HmuFrame& req, Transport* legacy_src = nullptr);
+    // Slot 0 auf AskSin, falls ein anderer Frontend umgeschaltet hat.
+    void     ensure_asksin_();
+
+    // Sendeauftrag (Legacy, APP_SEND mit Quittungswunsch an eine Adresse
+    // ungleich 000000). FHEM (00_HMUARTLGW.pm) kennt als Antwort darauf
+    // `04 03 <info> <rssi> <Antwort>` (ACK_WITH_RESPONSE, derselbe Auswertepfad
+    // wie `05`) und `04 04` (ACK_EUNKNOWN, geloggt als "no response?"); so
+    // antwortet der Stick jetzt, wenn das Geraet geantwortet hat bzw. nicht.
+    // Bis 0.2.7 kam sofort `04 01`, und blieb
+    // die Antwort aus, wiederholte niemand: CUL_HM wartet bei Weck- und
+    // Lazy-Config-Geraeten dann auf deren naechstes Aufwachen (Mitschnitt
+    // 01.11.2026, HM-SEC-SC-2 und HM-SEN-MDIR-SM). Jetzt sendet der Sende-Task,
+    // wartet und wiederholt hoechstens kMaxRetries Mal (Burst-Rahmen gar nicht),
+    // jeweils kRetryAfterUs nach dem Rahmenstart der letzten Sendung (124 ms
+    // Antwortzeit + 128 ms);
+    // nach der letzten wartet er bis kLastWaitUs, langsame Geraete brauchten
+    // fuer eine Liste bis ~470 ms. Jeder Auftrag endet spaetestens nach
+    // kJobDeadlineUs: FHEM sendet nach 10 s (SEND_TIMEOUT) selbst neu und
+    // verwirft ein spaeteres `04` als "delayed ACK" samt Antwort (Review 0208
+    // F2). Ein neues OS_GET_APP/OS_CHANGE_APP des Auftraggebers (FHEM-Init)
+    // verwirft den Auftrag. Die Antwort
+    // erkennt der RX-Pfad (on_asksin_rx_) an Zaehler, Absender und Ziel und
+    // schickt sie dem Auftraggeber als `04 03` statt als `05`. Grenze: Geraete
+    // zaehlen bei mehrteiligen Antworten selbst hoch (HM-TC-IT-WM-W-EU: Teil 2
+    // traegt Zaehler + 1). CUL_HM zaehlt je Nachricht +1, bei Listen-Anfragen
+    // +16 (am 01.11. FA -> 0B). Traegt FHEMs naechste Anfrage den Zaehler von
+    // Teil 2 und kommt vor ihm, gilt Teil 2 als Antwort und die echte Antwort
+    // kommt als `05` -- jeder Rahmen erreicht FHEM trotzdem genau einmal. FHEM
+    // sendet nach einem Rahmen mit Quittungswunsch erst 300 ms spaeter an
+    // dasselbe Geraet (nextSend), Teil 2 lag am 01.11. davor.
+    struct SendJob {
+        bool       active = false;
+        uint32_t   gen    = 0;          // zaehlt je Auftrag hoch
+        Transport* owner  = nullptr;
+        uint8_t    hmu_cnt = 0;         // Zaehler der HMU-Anfrage, FHEM ordnet `04` daran zu
+        uint8_t    cnt     = 0;         // BidCoS-Zaehler
+        uint8_t    src[3]{};
+        uint8_t    dst[3]{};
+        uint8_t    msg[64]{};           // [0] = Laenge, [1..] = Klartext ab Zaehler
+        uint32_t   t_start = 0;         // Annahme (esp_timer, untere 32 Bit)
+    };
+    static constexpr uint32_t kJobDeadlineUs  = 5'000'000;
+    static constexpr uint32_t kRetryLockMs    = 300;   // Slot-Sperre fuer Wiederholungen
+    static constexpr uint32_t kRetryAfterUs = 252'000;
+    static constexpr uint32_t kLastWaitUs   = 500'000;
+    static constexpr int      kMaxRetries   = 2;
+    SendJob           job_{};
+    SemaphoreHandle_t job_mtx_   = nullptr;   // Reihenfolge: mtx_ -> job_mtx_
+    void*             send_task_ = nullptr;
+    static void send_task_trampoline_(void* arg);
+    void        send_task_loop_();
+    // Auftrag gen mit `04 <ack...>` abschliessen, falls er noch offen ist.
+    void        finish_job_(uint32_t gen, std::initializer_list<uint8_t> ack);
 
     // Ein echtes Modul empfaengt immer BidCoS. Steht Slot 0 auf einer anderen
     // Klasse (z. B. `X21` ueber den culfw-Port), schaltet der erste gueltige
