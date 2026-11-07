@@ -222,9 +222,11 @@ void AskSinRF::drain_fifo() {
                 // Resync und beim leeren FIFO im ersten Lesen (dann gehoert sie
                 // zu keinem Rahmen mehr, z. B. ein CRC-OK-Rahmen, den
                 // CRC_AUTOFLUSH mit dem naechsten fehlerhaften Paket geraeumt hat,
-                // siehe clear_stale_rx_signal). Bei Busy, Error und Empty in einer
-                // Folgerunde bleibt sie: dort gehoert sie zum Rahmen im FIFO oder
-                // zum Paket, das gerade einlaeuft.
+                // siehe clear_stale_rx_signal). Bei Busy (seit 0.2.10 auch im
+                // ersten Lesen: ohne GDO2 laeuft ein Paket ein, etwa nach der
+                // Rueckkehr von tx()), Error und Empty in einer Folgerunde bleibt
+                // sie: dort gehoert sie zum Rahmen im FIFO oder zum Paket, das
+                // gerade einlaeuft.
                 if (r == CC1101Driver::RxPacket::Overflow ||
                     r == CC1101Driver::RxPacket::Resync ||
                     (r == CC1101Driver::RxPacket::Empty && i == 0)) {

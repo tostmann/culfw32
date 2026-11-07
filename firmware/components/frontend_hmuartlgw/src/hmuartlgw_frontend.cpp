@@ -987,7 +987,8 @@ HmuFrame HmuartlgwFrontend::handle_app_send_(const HmuFrame& req, Transport* leg
         std::memcpy(job_.src, body + 3, 3);
         std::memcpy(job_.dst, body + 6, 3);
         std::memcpy(job_.msg, f.data, static_cast<size_t>(f.len) + 1u);
-        job_.t_start = static_cast<uint32_t>(esp_timer_get_time());
+        job_.t_start      = static_cast<uint32_t>(esp_timer_get_time());
+        job_.resend_at_us = 0;
         xSemaphoreGive(job_mtx_);
         xTaskNotifyGive(static_cast<TaskHandle_t>(send_task_));
         out.payload.clear();                 // Antwort kommt spaeter
@@ -1099,85 +1100,249 @@ void HmuartlgwFrontend::send_task_loop_() {
         };
 
         uint32_t last_start = 0;
-        bool     done       = false;
-        int      busy       = 0;
         auto past = [&](uint32_t t) { return static_cast<int32_t>(t - now_us()) <= 0; };
         // Burst-Rahmen (Flag 0x10) nur einmal: jede Sendung traegt 360 ms
         // Praeambel, und CUL_HM wiederholt bei ausbleibender Antwort ohnehin
         // selbst (am 01.11. an einem stummen Aktor 4 Versuche); mit Wiederholung
         // im Stick kaeme ein Befehl an ein totes Burst-Geraet auf mehrere
-        // Sekunden Sendezeit (Review 0208 F5, entschieden 01.11.2026).
-        const int max_retries = (f.data[2] & 0x10) ? 0 : kMaxRetries;
-        for (int attempt = 0; attempt <= max_retries && !done; ) {
-            if (!open()) { done = true; break; }
-            if (past(deadline)) {
-                if (attempt > 0) break;                     // keine Wiederholung mehr
-                // Erster Versuch, aber die Frist ist schon um: der Task hing
-                // noch in der Sendung des Vorgaengers (Review 0208b B2). Nicht
-                // mehr senden, FHEM wiederholt nach 200 ms (CSMA/CA).
-                finish_job_(gen, {ACK, ACK_ECSMACA});
-                done = true;
-                break;
+        // Sekunden Sendezeit (Review 0208 F5, entschieden 01.11.2026). Aus
+        // demselben Grund keine Zusatzsendungen.
+        const bool burst       = (f.data[2] & 0x10) != 0;
+        const int  max_retries = burst ? 0 : kMaxRetries;
+        const int  max_extra   = burst ? 0 : kMaxExtraSends;
+        // Ziel des Auftrags: [0]=LEN [1]=CNT [2]=FLAG [3]=TYP [4..6]=Absender [7..9]=Ziel.
+        uint8_t dst[3];
+        std::memcpy(dst, f.data + 7, 3);
+
+        // Anforderung einer Zusatzsendung abholen und loeschen (0 = keine).
+        auto take_resend = [&] {
+            xSemaphoreTake(job_mtx_, portMAX_DELAY);
+            uint32_t ra = 0;
+            if (job_.active && job_.gen == gen) {
+                ra = job_.resend_at_us;
+                job_.resend_at_us = 0;
             }
-            f.cca_once   = attempt > 0;
-            f.sent_at_us = 0;
-            // Ohne mtx_: im Wettlauf mit claim_radio_ schlimmstenfalls eine
-            // doppelte Aktivierung derselben Klasse (harmlos).
-            ensure_asksin_();
-            // Erster Versuch: Slot-Sperre bis 3 s, aber nicht ueber die Frist
-            // hinaus; Wiederholungen nur kurz. Ein Auftrag soll FHEMs 10-s-Frist
-            // nie erreichen. Erst nach ensure_asksin_ rechnen (das kann selbst
-            // bis 3 s an der Slot-Sperre warten) und mit Vorzeichen, sonst
-            // liefe die Restzeit unter (Review 0209 C3).
-            uint32_t lock_ms = kRetryLockMs;
-            if (attempt == 0) {
-                const int32_t left_us = static_cast<int32_t>(deadline - now_us());
-                if (left_us <= 0) {
+            xSemaphoreGive(job_mtx_);
+            return ra;
+        };
+        // Bis t_us warten. Done: Auftrag erledigt. Resend: auto_ack_() hat einen
+        // Rahmen des Ziels quittiert, Zusatzsendung ab resend_at.
+        enum class Wake : uint8_t { Done, Resend, Timeout };
+        uint32_t resend_at = 0;
+        auto wait_job = [&](uint32_t t_us) {
+            for (;;) {
+                if (!open()) return Wake::Done;
+                if (const uint32_t ra = take_resend(); ra) { resend_at = ra; return Wake::Resend; }
+                const int32_t r = static_cast<int32_t>(t_us - now_us());
+                if (r <= 0) return Wake::Timeout;
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(r / 1000) + 1);
+            }
+        };
+        // Halten, solange am Ziel eine Quittung aussteht oder nach einer
+        // verworfenen (holds_): warten, bis auto_ack_() es freigibt, die Zeit um
+        // ist oder die Frist des Auftrags erreicht (danach entscheidet
+        // send_once ueber `04 06` bzw. das Ende der Sendungen, Review 0210 D4).
+        // true = der Auftrag ist inzwischen erledigt.
+        auto hold = [&] {
+            for (;;) {
+                if (!open()) return true;
+                xSemaphoreTake(job_mtx_, portMAX_DELAY);
+                uint32_t left = hold_left_(dst);
+                xSemaphoreGive(job_mtx_);
+                const int32_t to_deadline = static_cast<int32_t>(deadline - now_us());
+                if (left == 0 || to_deadline <= 0) return false;
+                if (left > static_cast<uint32_t>(to_deadline)) left = static_cast<uint32_t>(to_deadline);
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(left / 1000) + 1);
+            }
+        };
+
+        // Eine Sendung samt CCA-Behandlung. Sent: gesendet (last_start neu).
+        // Done: Auftrag erledigt oder abgeschlossen. Stop: keine weitere
+        // Sendung, das Antwortfenster der letzten laeuft weiter.
+        enum class Tx : uint8_t { Sent, Done, Stop };
+        auto send_once = [&](bool first_try) {
+            int busy = 0;
+            for (;;) {
+                if (hold()) return Tx::Done;
+                // Hat die Quittung, die das Halten aufhob, eine Zusatzsendung
+                // angefordert, nicht vor deren Zeitpunkt senden: das Ziel soll
+                // unsere Quittung erst fertig empfangen haben.
+                if (const uint32_t ra = take_resend(); ra && wait_done(ra)) return Tx::Done;
+                if (past(deadline)) {
+                    if (!first_try) return Tx::Stop;        // keine Wiederholung mehr
+                    // Erster Versuch, aber die Frist ist schon um: der Task hing
+                    // noch in der Sendung des Vorgaengers (Review 0208b B2). Nicht
+                    // mehr senden, FHEM wiederholt nach 200 ms (CSMA/CA).
                     finish_job_(gen, {ACK, ACK_ECSMACA});
-                    done = true;
-                    break;
+                    return Tx::Done;
                 }
-                const uint32_t left_ms = static_cast<uint32_t>(left_us) / 1000u;
-                lock_ms = left_ms < CC1101Slot::kOpTimeoutMs ? (left_ms ? left_ms : 1u)
-                                                             : CC1101Slot::kOpTimeoutMs;
-            }
-            const esp_err_t e = services_.rf_manager
-                ? services_.rf_manager->tx(ProtocolId::AskSin, &f, sizeof(f), lock_ms)
-                : ESP_ERR_INVALID_STATE;
-            if (e == ESP_ERR_NOT_FINISHED) {
-                // Wiederholung, Kanal belegt: womoeglich laeuft gerade die
-                // Antwort ein. In 20-ms-Schritten neu pruefen, hoechstens
-                // 10 Mal, dann keine weitere Wiederholung.
-                if (wait_done(now_us() + 20'000)) { done = true; break; }
-                if (++busy > 10) break;
-                continue;
-            }
-            if (e != ESP_OK) {
-                if (attempt == 0) {
-                    // Wie bisher: nichts gesendet, FHEM entscheidet (CSMA/CA
-                    // wiederholt es nach 200 ms).
-                    const uint8_t code = (e == ESP_ERR_TIMEOUT) ? ACK_ECSMACA : ACK_EUNKNOWN;
-                    finish_job_(gen, {ACK, code});
-                    done = true;
+                f.cca_once   = !first_try;
+                f.sent_at_us = 0;
+                // Ohne mtx_: im Wettlauf mit claim_radio_ schlimmstenfalls eine
+                // doppelte Aktivierung derselben Klasse (harmlos).
+                ensure_asksin_();
+                // Erster Versuch: Slot-Sperre bis 3 s, aber nicht ueber die Frist
+                // hinaus; Wiederholungen nur kurz. Ein Auftrag soll FHEMs 10-s-Frist
+                // nie erreichen. Erst nach ensure_asksin_ rechnen (das kann selbst
+                // bis 3 s an der Slot-Sperre warten) und mit Vorzeichen, sonst
+                // liefe die Restzeit unter (Review 0209 C3).
+                uint32_t lock_ms = kRetryLockMs;
+                if (first_try) {
+                    const int32_t left_us = static_cast<int32_t>(deadline - now_us());
+                    if (left_us <= 0) {
+                        finish_job_(gen, {ACK, ACK_ECSMACA});
+                        return Tx::Done;
+                    }
+                    const uint32_t left_ms = static_cast<uint32_t>(left_us) / 1000u;
+                    lock_ms = left_ms < CC1101Slot::kOpTimeoutMs ? (left_ms ? left_ms : 1u)
+                                                                 : CC1101Slot::kOpTimeoutMs;
                 }
-                break;
+                const esp_err_t e = services_.rf_manager
+                    ? services_.rf_manager->tx(ProtocolId::AskSin, &f, sizeof(f), lock_ms)
+                    : ESP_ERR_INVALID_STATE;
+                if (e == ESP_ERR_NOT_FINISHED) {
+                    // Wiederholung, Kanal belegt: womoeglich laeuft gerade die
+                    // Antwort ein. In 20-ms-Schritten neu pruefen, hoechstens
+                    // 10 Mal, dann keine weitere Wiederholung.
+                    if (wait_done(now_us() + 20'000)) return Tx::Done;
+                    if (++busy > 10) return Tx::Stop;
+                    continue;
+                }
+                if (e != ESP_OK) {
+                    if (first_try) {
+                        // Wie bisher: nichts gesendet, FHEM entscheidet (CSMA/CA
+                        // wiederholt es nach 200 ms).
+                        const uint8_t code = (e == ESP_ERR_TIMEOUT) ? ACK_ECSMACA : ACK_EUNKNOWN;
+                        finish_job_(gen, {ACK, code});
+                        return Tx::Done;
+                    }
+                    return Tx::Stop;
+                }
+                last_start = f.sent_at_us ? f.sent_at_us : now_us();
+                return Tx::Sent;
             }
-            last_start = f.sent_at_us ? f.sent_at_us : now_us();
-            busy = 0;
-            ++attempt;
-            if (attempt > max_retries) break;
-            if (wait_done(last_start + kRetryAfterUs)) done = true;
-            else ESP_LOGD(TAG, "APP_SEND cnt %02X: no answer, repeat %d", f.data[1], attempt);
+        };
+
+        // Erstversuch, dann Wiederholungen im 252-ms-Takt, dazwischen und danach
+        // Zusatzsendungen auf Anforderung. Nach der letzten Sendung immer das
+        // volle Antwortfenster, auch wenn die Frist dabei verstreicht: sie
+        // begrenzt Sendungen, nicht das Zuhoeren (Review 0208b B1). Im Regelfall
+        // dauert ein Auftrag unter ~6 s, im Extremfall (Slot-Sperre, CCA, Burst,
+        // Halten) bis ~9 s, unter FHEMs 10 s (Review 0209, 0210 D6).
+        bool done = false;
+        Tx   t    = send_once(true);
+        if (t == Tx::Done) continue;
+        int  attempt = (t == Tx::Sent) ? 1 : 0;   // Sendungen im Takt
+        bool stop    = (t != Tx::Sent);
+        int  extra   = 0;
+        while (last_start) {
+            const bool more = !stop && attempt <= max_retries;
+            const Wake w = wait_job(last_start + (more ? kRetryAfterUs : kLastWaitUs));
+            if (w == Wake::Done) { done = true; break; }
+            if (w == Wake::Resend) {
+                if (extra >= max_extra || past(deadline)) continue;   // weiter warten
+                ++extra;
+                ESP_LOGD(TAG, "APP_SEND cnt %02X: target sent, extra send %d", f.data[1], extra);
+                if (wait_done(resend_at)) { done = true; break; }
+                t = send_once(false);
+                if (t == Tx::Done) { done = true; break; }
+                continue;                     // Sent: Fenster ab der neuen Sendung
+            }
+            if (!more) break;                 // Antwortfenster der letzten Sendung vorbei
+            ESP_LOGD(TAG, "APP_SEND cnt %02X: no answer, repeat %d", f.data[1], attempt);
+            t = send_once(false);
+            if (t == Tx::Done) { done = true; break; }
+            if (t == Tx::Sent) ++attempt;
+            else stop = true;
         }
         if (done) continue;
-        // Nach der letzten Sendung immer das volle Antwortfenster, auch wenn
-        // die Frist dabei verstreicht: sie begrenzt Wiederholungen, nicht das
-        // Zuhoeren (Review 0208b B1). Im Regelfall dauert ein Auftrag unter
-        // ~6 s, im Extremfall (Slot-Sperre, CCA, Burst) bis ~8 s, unter FHEMs
-        // 10 s (Review 0209).
-        if (last_start && wait_done(last_start + kLastWaitUs)) continue;
         finish_job_(gen, {ACK, ACK_EUNKNOWN});
     }
+}
+
+void HmuartlgwFrontend::hold_set_(const uint8_t* id, uint32_t until_us) {
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time());
+    Hold* slot = nullptr;
+    for (auto& h : holds_) {                         // derselbe Geraeteplatz
+        if (h.used && std::memcmp(h.id, id, 3) == 0) { slot = &h; break; }
+    }
+    // Abgelaufen oder ueber der laengsten Haltezeit (32-Bit-Ueberlauf nach
+    // langer Ruhe des Geraets, Review 0210b E1): gilt als frei.
+    auto stale = [now](const Hold& h) {
+        const int32_t left = static_cast<int32_t>(h.until_us - now);
+        return left <= 0 || static_cast<uint32_t>(left) > kHoldAfterDropUs;
+    };
+    if (slot) {
+        // Eine laengere, noch gueltige Haltezeit (nach Verwerfen) bleibt gegen
+        // eine kuerzere.
+        if (stale(*slot) || static_cast<int32_t>(until_us - slot->until_us) > 0) {
+            slot->until_us = until_us;
+        }
+        return;
+    }
+    for (auto& h : holds_) {                         // frei oder abgelaufen
+        if (!h.used || stale(h)) { slot = &h; break; }
+    }
+    if (!slot) {                                     // sonst der zuerst ablaufende
+        slot = &holds_[0];
+        for (auto& h : holds_) {
+            if (static_cast<int32_t>(h.until_us - slot->until_us) < 0) slot = &h;
+        }
+    }
+    slot->used = true;
+    std::memcpy(slot->id, id, 3);
+    slot->until_us = until_us;
+}
+
+void HmuartlgwFrontend::hold_clear_(const uint8_t* id) {
+    for (auto& h : holds_) {
+        if (h.used && std::memcmp(h.id, id, 3) == 0) h.used = false;
+    }
+}
+
+uint32_t HmuartlgwFrontend::hold_left_(const uint8_t* id) {
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time());
+    for (auto& h : holds_) {
+        if (!h.used || std::memcmp(h.id, id, 3) != 0) continue;
+        const int32_t left = static_cast<int32_t>(h.until_us - now);
+        // Abgelaufen, oder ein Rest ueber der laengsten Haltezeit: dann ist der
+        // 32-Bit-Zaehler seit dem Setzen uebergelaufen (Review 0210 D1).
+        if (left <= 0 || static_cast<uint32_t>(left) > kHoldAfterDropUs) {
+            h.used = false;
+            return 0;
+        }
+        return static_cast<uint32_t>(left);
+    }
+    return 0;
+}
+
+void HmuartlgwFrontend::note_ack_pending_(const uint8_t* id, uint32_t air_start_us) {
+    if (!job_mtx_) return;
+    xSemaphoreTake(job_mtx_, portMAX_DELAY);
+    hold_set_(id, air_start_us + kHoldPendingUs);
+    xSemaphoreGive(job_mtx_);
+}
+
+void HmuartlgwFrontend::note_ack_dropped_(const uint8_t* id) {
+    if (!job_mtx_) return;
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time());
+    xSemaphoreTake(job_mtx_, portMAX_DELAY);
+    hold_set_(id, now + kHoldAfterDropUs);
+    xSemaphoreGive(job_mtx_);
+}
+
+void HmuartlgwFrontend::note_ack_sent_(const uint8_t* id, uint32_t sent_at_us) {
+    if (!job_mtx_) return;
+    bool wake = false;
+    xSemaphoreTake(job_mtx_, portMAX_DELAY);
+    if (hold_left_(id)) wake = true;
+    hold_clear_(id);
+    if (job_.active && std::memcmp(job_.dst, id, 3) == 0) {
+        job_.resend_at_us = (sent_at_us + kResendAfterAckUs) | 1u;
+        wake = true;
+    }
+    xSemaphoreGive(job_mtx_);
+    if (wake && send_task_) xTaskNotifyGive(static_cast<TaskHandle_t>(send_task_));
 }
 
 void HmuartlgwFrontend::claim_radio_() {
@@ -1263,6 +1428,11 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) 
     if (idx >= 0) wakeup = peers_[static_cast<size_t>(idx)].wakeup;
     xSemaphoreGive(peer_mtx_);
     if (idx < 0) return;
+    // Bis die Quittung raus ist, hoert das Geraet auf nichts anderes: einen
+    // Auftrag an es so lange halten (Review 0210 D3; sonst ging ein Versuch,
+    // fuer den das Halten nach Verwerfen eben abgelaufen war, noch vor der
+    // Quittung seiner Wiederholung raus).
+    note_ack_pending_(m + 4, air_start_us);
 
     // Quittung wie FHEM sie baut (CUL_HM: `<cnt> 80 02 <eigene> <Geraet> 00`).
     // Fuer einen Peer mit Wakeup-Byte im ADD_PEER traegt sie das Wach-Bit
@@ -1318,6 +1488,7 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) 
     if (age >= kAutoAckLateMs) {
         ESP_LOGW(TAG, "auto-ACK %02X%02X%02X cnt %02X skipped, %u ms late",
                  m[4], m[5], m[6], m[1], static_cast<unsigned>(age));
+        note_ack_dropped_(m + 4);       // das Geraet wiederholt, Auftraege an es halten
         return;
     }
     AskSinTxFrame f{};
@@ -1345,6 +1516,12 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) 
         ESP_LOGW(TAG, "auto-ACK %02X%02X%02X cnt %02X: %s",
                  m[4], m[5], m[6], m[1], esp_err_to_name(e));
     }
+    // Laeuft ein Auftrag an dieses Geraet, hat es ihn waehrend seines eigenen
+    // Rahmens nicht gehoert: nach der Quittung noch einmal senden. Ohne
+    // Quittung wiederholt es seinen Rahmen; bis dahin Auftraege an es halten
+    // (siehe SendJob).
+    if (f.sent_at_us) note_ack_sent_(m + 4, f.sent_at_us);
+    else              note_ack_dropped_(m + 4);
 }
 
 void HmuartlgwFrontend::on_asksin_rx_(const RxEvent& ev) {

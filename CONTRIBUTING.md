@@ -30,3 +30,19 @@ no effect on whether your contribution is accepted into CULFW32.
 - Keep the license header and origin notices of every file intact. Code taken
   from another project needs its original copyright lines and a note what was
   changed.
+
+## Frequency calibration (FSCTRL0)
+
+The CC1101 frequency offset belongs to the board, not to a protocol. The driver
+(`cc1101_driver`) holds the value: the stored `?rf.freqoff` override, otherwise
+the factory value from eFuse, otherwise 0. It writes the value over a table's
+FSCTRL0 in `write_reg()` and restores it after every `SRES`.
+
+- A protocol class does not calibrate. Its register table sets FSCTRL0 (`0x0C`)
+  to `0x00` or leaves it out, and its nominal carrier goes into FREQ2..0.
+- `write_reg_raw()` bypasses the driver's value. It is meant for manual register
+  access (`Cw`) and measurements, not for protocol code.
+- The one intended exception is the SlowRF EEPROM byte at address `0x0E` (`W0E`):
+  a non-zero value is used as FSCTRL0 as written, `0x00` means the calibration
+  applies. This is not implemented yet; as of 0.2.9 a calibrated stick ignores
+  `W0E`.

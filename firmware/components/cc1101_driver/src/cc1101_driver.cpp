@@ -452,22 +452,36 @@ bool CC1101Driver::rx_frame_waiting() {
 
 CC1101Driver::RxPacket CC1101Driver::read_rx_packet(std::span<uint8_t> buf, uint8_t& rssi,
                                                     uint8_t& lqi, bool first) {
-    // Folgerahmen nur lesen, solange kein Paket einlaeuft — geprueft vor UND
-    // nach RXBYTES, damit ein eben begonnenes Paket nicht mitgezaehlt wird und
-    // sein Laengenbyte als Kopf eines fertigen Rahmens durchgeht.
-    if (!first && rx_packet_in_progress()) return RxPacket::Busy;
+    // Nur lesen, solange kein Paket einlaeuft -- geprueft vor UND nach RXBYTES,
+    // damit ein eben begonnenes Paket nicht mitgezaehlt wird und sein
+    // Laengenbyte als Kopf eines fertigen Rahmens durchgeht. Ausgenommen ist
+    // allein das erste Lesen bei stehendem GDO2 (CRC_OK): dann liegt vorn im
+    // FIFO ein beendetes Paket, auch wenn dahinter schon das naechste einlaeuft
+    // (RXOFF_MODE = RX, Moritz). Ohne GDO2 gilt die Pruefung auch fuer das erste
+    // Lesen: so ruft z. B. AskSinRF::tx() den RX-Task nach jeder Rueckkehr auf,
+    // auch wenn das CCA die Sendung gerade wegen eines einlaufenden Rahmens
+    // abgewiesen hat. Bis 0.2.9 lief der Teilrahmen dort in den Resync-Zweig
+    // unten und wurde geflusht (Code-Befund 03.11.2026; die Zeitstempel eines
+    // Feldlogs mit HM-SEN-MDIR-SM passen dazu, gemessen ist es dort nicht).
+    // Ein Paket, das nach der ersten Pruefung beginnt, steht bei der zweiten
+    // noch im SFD (ab dem Sync mindestens ~10 ms: Laengenbyte, 10 Byte einer
+    // Quittung und 2 Byte CRC bei 10 kbit/s); eines, das bei der ersten lief, meldet
+    // Busy. Nach zweimal SFD = 0 gehoert der FIFO-Inhalt also zu keinem
+    // laufenden Paket (SWRS061I S. 94).
+    const bool done_frame = first && gdo2_level();
+    if (!done_frame && rx_packet_in_progress()) return RxPacket::Busy;
     uint8_t rxb = 0;
     if (rx_fifo_bytes(rxb) != ESP_OK) return RxPacket::Error;
     if (rxb & 0x80) return RxPacket::Overflow;
     const uint8_t avail = rxb & 0x7F;
     if (avail == 0) {
-        if (first && gdo2_level()) {
+        if (done_frame) {
             rx_stale_.fetch_add(1, std::memory_order_relaxed);
             clear_stale_rx_signal();
         }
         return RxPacket::Empty;
     }
-    if (!first && rx_packet_in_progress()) return RxPacket::Busy;
+    if (!done_frame && rx_packet_in_progress()) return RxPacket::Busy;
 
     uint8_t len_raw = 0;
     if (read_reg(REG_FIFO, len_raw) != ESP_OK) return RxPacket::Error;

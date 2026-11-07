@@ -137,7 +137,7 @@ private:
     // Nach kJobDeadlineUs wird nicht mehr wiederholt und ein noch nicht
     // gesendeter Auftrag mit `04 06` (CSMA/CA) beendet; eine laufende Sendung
     // und das Antwortfenster danach kommen noch dazu, im Regelfall unter ~6 s,
-    // im Extremfall bis ~8 s. FHEM sendet nach 10 s (SEND_TIMEOUT) selbst neu
+    // im Extremfall bis ~9 s (mit Halten). FHEM sendet nach 10 s (SEND_TIMEOUT) selbst neu
     // und verwirft ein spaeteres `04` als "delayed ACK" samt Antwort (Review
     // 0208 F2, 0208b B1/B2). Ein neues OS_GET_APP/OS_CHANGE_APP des
     // Auftraggebers (FHEM-Init) verwirft den Auftrag. Die Antwort erkennt der
@@ -150,6 +150,23 @@ private:
     // Antwort kommt als `05` -- jeder Rahmen erreicht FHEM trotzdem genau
     // einmal. FHEM sendet nach einem Rahmen mit Quittungswunsch erst 300 ms
     // spaeter an dasselbe Geraet (nextSend), Teil 2 lag am 01.11. davor.
+    //
+    // Sendet das Ziel selbst, waehrend der Auftrag laeuft (es wiederholt einen
+    // Rahmen, dessen Quittung es nicht bekam), hoert es nicht auf den Auftrag:
+    // es wartet auf seine Quittung. Quittiert auto_ack_() einen Rahmen des
+    // Ziels, sendet der Auftrag deshalb kResendAfterAckUs nach dieser Quittung
+    // noch einmal, hoechstens kMaxExtraSends Mal je Auftrag und nur vor
+    // kJobDeadlineUs (nicht bei Burst-Rahmen). Gehalten (kein Versuch an das
+    // Geraet) wird, solange eine Quittung an es aussteht -- vom Empfang seines
+    // Rahmens bis zur Quittung -- und nach einer verworfenen Quittung (Frist
+    // kAutoAckLateMs, etwa wegen eines fremden Bursts) bis kHoldAfterDropUs:
+    // seine Wiederholung kommt sicher, und die Versuche dazwischen hoert es
+    // ohnehin nicht. Die Quittung der Wiederholung hebt das Halten auf; ueber die
+    // Frist des Auftrags hinaus wird nie gehalten. Anlass: COC-Mitschnitt
+    // 06.11.2026 (HM-SEN-MDIR-SM, CUL32 als IO): Burst des CUBe ab T+76,
+    // Quittung auf die Antwort T verworfen, die naechste Anfrage dreimal
+    // (T+472/732/992) ins Leere, die Wiederholung des Melders erst T+1084
+    // quittiert, danach kein Versuch mehr -- "1 CMDs_pending".
     struct SendJob {
         bool       active = false;
         uint32_t   gen    = 0;          // zaehlt je Auftrag hoch
@@ -160,19 +177,57 @@ private:
         uint8_t    dst[3]{};
         uint8_t    msg[64]{};           // [0] = Laenge, [1..] = Klartext ab Zaehler
         uint32_t   t_start = 0;         // Annahme (esp_timer, untere 32 Bit)
+        uint32_t   resend_at_us = 0;    // Zusatzsendung ab hier (0 = keine), setzt auto_ack_()
     };
     static constexpr uint32_t kJobDeadlineUs  = 5'000'000;
     static constexpr uint32_t kRetryLockMs    = 300;   // Slot-Sperre fuer Wiederholungen
     static constexpr uint32_t kRetryAfterUs = 252'000;
     static constexpr uint32_t kLastWaitUs   = 500'000;
     static constexpr int      kMaxRetries   = 2;
+    // Zusatzsendung nach einer Quittung an das Ziel: 124 ms nach deren Start,
+    // wie tsculfw seine naechste Anfrage nach der eigenen Quittung sendet; im
+    // COC-Mitschnitt vom 06.11. beantwortete der HM-SEN-MDIR-SM so jede Anfrage
+    // (z. B. 17:37, Quittung 95 bei 08649320, Anfrage 96 bei 08649444, Antwort
+    // bei 08649568). Eine Anfrage 28 ms nach unserer Quittung beantwortete er
+    // einmal (17:23, 07812800/07812828/07812952) -- dafuer gibt es nur diesen
+    // einen Beleg, deshalb die 124 ms.
+    static constexpr int      kMaxExtraSends    = 2;
+    static constexpr uint32_t kResendAfterAckUs = 124'000;
+    // Halten nach verworfener Quittung. Der HM-SEN-MDIR-SM wiederholte in den
+    // Mitschnitten vom 06.11. nach 384 und 760 ms (Zaehler FF) bzw. 680 ms
+    // (nach einem fremden Burst), der HM-TC-IT-WM-W-EU nach ~210 ms.
+    static constexpr uint32_t kHoldAfterDropUs  = 1'000'000;
+    // Halten, solange eine Quittung aussteht: bis zu deren Frist kAutoAckLateMs
+    // (200 ms ab Rahmenstart) plus 50 ms Reserve (static_assert bei kAutoAckLateMs).
+    static constexpr uint32_t kHoldPendingUs    = 250'000;
     SendJob           job_{};
     SemaphoreHandle_t job_mtx_   = nullptr;   // Reihenfolge: mtx_ -> job_mtx_
     void*             send_task_ = nullptr;
+    // Halteplaetze je Geraet (job_mtx_). Belegt wird der Platz desselben
+    // Geraets, sonst ein freier, sonst der zuerst ablaufende.
+    struct Hold {
+        bool     used = false;
+        uint8_t  id[3]{};
+        uint32_t until_us = 0;      // esp_timer, untere 32 Bit
+    };
+    static constexpr size_t kHolds = 4;
+    Hold              holds_[kHolds]{};
+    // Alle drei: job_mtx_ MUSS gehalten sein. hold_left_ gibt die Restzeit in
+    // µs (0 = nicht halten) und raeumt abgelaufene Plaetze; eine Restzeit ueber
+    // kHoldAfterDropUs gilt als Ueberlauf des 32-Bit-Zaehlers und wird
+    // ebenfalls geraeumt (Review 0210 D1: nach 35,8 min kippte die Differenz).
+    void        hold_set_(const uint8_t* id, uint32_t until_us);
+    void        hold_clear_(const uint8_t* id);
+    uint32_t    hold_left_(const uint8_t* id);
     static void send_task_trampoline_(void* arg);
     void        send_task_loop_();
     // Auftrag gen mit `04 <ack...>` abschliessen, falls er noch offen ist.
     void        finish_job_(uint32_t gen, std::initializer_list<uint8_t> ack);
+    // Aus auto_ack_(): Quittung an id steht aus (Rahmenstart air_start_us),
+    // entfallen bzw. gesendet (Start sent_at_us).
+    void        note_ack_pending_(const uint8_t* id, uint32_t air_start_us);
+    void        note_ack_dropped_(const uint8_t* id);
+    void        note_ack_sent_(const uint8_t* id, uint32_t sent_at_us);
 
     // Ein echtes Modul empfaengt immer BidCoS. Steht Slot 0 auf einer anderen
     // Klasse (z. B. `X21` ueber den culfw-Port), schaltet der erste gueltige
@@ -210,6 +265,7 @@ private:
     // Laeuft im AskSin-RX-Task, ohne mtx_, nach der Weitergabe an die Hosts.
     static constexpr uint32_t kAutoAckStartUs = 124'000;
     static constexpr uint32_t kAutoAckLateMs  = 200;
+    static_assert(kHoldPendingUs >= kAutoAckLateMs * 1000u, "Halten muss die Quittungsfrist abdecken");
     void     auto_ack_(const struct AskSinFrame& af, uint32_t air_start_us);
 
     // RX-Subscription auf AskSinRF — wrappt RxEvent als APP_RECV Frame und

@@ -169,9 +169,12 @@ public:
     // Obergrenze je Durchlauf: 64-Byte-FIFO, BidCoS-/MAX!-Rahmen belegen >= 13
     // Byte — mehr als vier passen real nicht hinein; 8 begrenzt nur die Schleife.
     static constexpr int kRxFramesPerDrain = 8;
-    // first = true fuer den ersten Rahmen nach einer GDO2-Meldung (der Kopf des
-    // FIFO gehoert dann sicher zu einem beendeten Paket), false fuer jeden
-    // weiteren. buf.size() begrenzt die Laenge (Laenge >= buf.size() = Resync).
+    // first = true fuer das erste Lesen eines Durchlaufs, false fuer jedes
+    // weitere. Nur wenn dabei GDO2 (CRC_OK) steht, gehoert der Kopf des FIFO
+    // sicher zu einem beendeten Paket und wird ohne SFD-Pruefung gelesen; sonst
+    // (Wecken nach einer eigenen Sendung, Heartbeat) meldet ein einlaufendes
+    // Paket Busy wie bei Folgerahmen, statt als Teilrahmen geflusht zu werden.
+    // buf.size() begrenzt die Laenge (Laenge >= buf.size() = Resync).
     RxPacket read_rx_packet(std::span<uint8_t> buf, uint8_t& rssi, uint8_t& lqi, bool first);
     // Liegt ein fertiger Rahmen im FIFO, den keine Flanke gemeldet hat? Netz
     // unter der Flanke fuer den Heartbeat der RX-Tasks.
