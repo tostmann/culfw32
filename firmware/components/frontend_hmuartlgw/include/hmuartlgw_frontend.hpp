@@ -229,9 +229,10 @@ private:
     void        note_ack_dropped_(const uint8_t* id);
     void        note_ack_sent_(const uint8_t* id, uint32_t sent_at_us);
 
-    // Ein echtes Modul empfaengt immer BidCoS. Steht Slot 0 auf einer anderen
-    // Klasse (z. B. `X21` ueber den culfw-Port), schaltet der erste gueltige
-    // Rahmen einer HMU-Verbindung auf AskSin zurueck. mtx_ gehalten.
+    // Ein echtes Modul empfaengt immer BidCoS. Ist Slot 0 frei (nach dem Boot:
+    // start() aktiviert nichts mehr) oder steht er auf einer anderen Klasse
+    // (z. B. `X21` ueber den culfw-Port), schaltet der erste gueltige Rahmen
+    // einer HMU-Verbindung auf AskSin. mtx_ gehalten.
     void claim_radio_();
 
     // Peer-Tabelle des HM-MOD-RPI-PCB (Legacy). FHEM verwirft seine eigene

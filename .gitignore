@@ -62,6 +62,8 @@ test/pa_2026-09-03/
 test/pa_2026-09-07/
 test/protomatrix_2026-10-08/
 test/hmu_acktime_2026-11-01/
+test/wmbus_wmbusmeters_2026-11-07/
+test/wmbus_cmode_2026-11-08/
 
 # Product photos, stored locally — not part of the firmware sources
 /pics/

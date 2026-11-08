@@ -367,6 +367,8 @@ ACK codes: 0x01=OK, 0x02=ACK_INFO, 0x05=ENO_CREDITS (LOVF), 0x06=ECSMACA, 0x07=A
 
 After that, `cond=ok`, `Initialized=1`. The module is ready for operation.
 
+The radio is not switched to AskSin at boot. The first valid frame a client sends (here: `OS_GET_APP`) switches the CC1101 to BidCoS reception, and every `OS_GET_CREDITS` (FHEM polls it every 15 s) and every transmit switch it back if another client has changed the mode in the meantime (e.g. `X21` on the culfw port). A connection that never sends a frame receives BidCoS frames only while another client keeps the radio on AskSin.
+
 ---
 
 ## Sources

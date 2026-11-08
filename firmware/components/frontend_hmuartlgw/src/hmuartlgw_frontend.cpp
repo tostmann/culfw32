@@ -271,16 +271,23 @@ esp_err_t HmuartlgwFrontend::start() {
         // Reply auf COMMON_IDENTIFY im dispatch_-Pfad.
     }
 
-    // Phase 2 wiring: AskSinRF auf Slot 0 aktivieren (HMUARTLGW pinnt sich
-    // dort fest), RX-Events des Manager-Fanout abonnieren. Schlaegt fehl wenn
-    // CC1101 nicht ansprechbar — das logged der Manager selbst, wir bleiben
-    // dann ohne RF-Pfad aktiv (Init-Sequenz mit FHEM funktioniert weiter,
-    // nur APP_SEND/APP_RECV liefern keine Funk-Frames).
+    // Nur die RX-Events des Manager-Fanout abonnieren; Slot 0 bleibt beim
+    // Start frei. Bis 0.2.11 (seit der Basis 0.1.90) schaltete start() hier
+    // AskSin ein -- bei jedem Boot mit Netz (WLAN-Modus != 0 oder W5500),
+    // auch ohne einen einzigen HMU-Klienten: der Stick empfing BidCoS und
+    // der culfw-Pfad schrieb `A...`-Zeilen auf USB, TCP 2323 und ins
+    // Web-Terminal, ohne dass jemand `Ar` geschickt hatte (gemessen
+    // 08.11.2026 an 0.2.11: WLAN-Modus 1 mit unbekannter SSID -> `rf.proto`
+    // AskSin, 16 A-Zeilen in 65 s; Modus 0 -> `none`). a-culfw empfaengt
+    // AskSin erst nach `Ar`, und ohne Netz tat CULFW32 das auch -- der
+    // Boot soll in beiden Faellen gleich aussehen. Die Aktivierung ist seit
+    // 0.2.5 ohnehin ueberfluessig: jede HMU-Verbindung holt sich AskSin mit
+    // ihrem ersten gueltigen Rahmen (claim_radio_() aus on_rx_data_, auch
+    // fuer HB-RF-ETH-UDP ueber attach_dynamic_transport), mit jedem
+    // OS_GET_CREDITS und vor jedem Senden (ensure_asksin_()). Die
+    // Subscription haengt nicht an einer aktiven Klasse (RfManager::
+    // subscribe legt nur den Callback ab).
     if (services_.rf_manager) {
-        ProtocolId target = ProtocolId::AskSin;
-        if (services_.rf_manager->activate(target, 0) != ESP_OK) {
-            ESP_LOGW(TAG, "RF activation on slot 0 failed (target=%u)", static_cast<unsigned>(target));
-        }
         services_.rf_manager->subscribe(ProtocolId::AskSin,
             [this](const RxEvent& ev) { on_asksin_rx_(ev); });
     }

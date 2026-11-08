@@ -54,14 +54,22 @@ wmbusmeters --format=json /tmp/ttyCUL32:cul:c1 MyWater <driver> <meter id> <AES 
 
 This bridge was tested in mode T1.
 
+The development version of wmbusmeters (after 3.1.1) runs `CMD(...)` in both directions and reaches the stick without socat; tested in modes C1 and T1:
+
+```
+wmbusmeters --format=json 'cul:c1:CMD(nc <stick-ip> 2323)' MyWater <driver> <meter id> <AES key>
+```
+
 ---
 
 ## FHEM
 
 Define the stick as a `CUL` device, on USB or as `<stick-ip>:2323`, and set its attribute `rfmode` to `WMBus_S`, `WMBus_T` or `WMBus_C`. FHEM then sends `X21` followed by `brs`, `brt` or `brc` (`00_CUL.pm`). The module `WMBUS` decodes the frames and takes the key in its attribute `AESkey`; it reads lines starting with `bY` as frame format B (`36_WMBUS.pm`).
 
+Two limits on the FHEM side: in `00_CUL.pm` the `WMBus_C` branch checks for `brt` instead of `brc`, so a direct change from `WMBus_T` to `WMBus_C` has no effect — set `rfmode` to `SlowRF` in between. `CUL_Parse` filters the answers `SMODE` and `TMODE`, but not `CMODE`.
+
 ---
 
 ## Reception
 
-In lab tests with generated frames, telegrams with the shortest preamble the standard allows arrived less often (about four out of five) than telegrams with a long preamble (nearly all), in modes T1 and C1 alike. Meters send their readings again and again, so a lost telegram is followed by the next one.
+In lab tests with generated frames, telegrams with a short preamble — 19 pairs of `01` chips before the sync word, the minimum EN 13757-4 sets for T1 — arrived less often (about four out of five) than telegrams with 64 pairs (nearly all), in modes T1 and C1 alike. Meters send their readings again and again, so a lost telegram is followed by the next one.

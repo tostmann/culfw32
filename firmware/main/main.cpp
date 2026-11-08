@@ -1727,8 +1727,9 @@ extern "C" void app_main(void) {
 
 #if defined(CONFIG_CULFW32_BUILD_FRONTEND_SIGNALDUINO) && defined(CONFIG_CULFW32_BUILD_NET_WIFI)
     // SIGNALduino-Frontend auf separatem TCP-Port (Default 2326). Aktiviert die
-    // PulseCapture-RF-Klasse auf Slot 0 — exklusiv mit SlowRfRF (gleiche
-    // Hardware-Resource). FHEM-Define: `SIGNALduino <ip>:2326`.
+    // PulseCapture-RF-Klasse auf Slot 0, sobald sich ein Klient verbindet und
+    // der Slot frei ist — exklusiv mit SlowRfRF (gleiche Hardware-Resource).
+    // FHEM-Define: `SIGNALduino <ip>:2326`.
     if (net_up) {
         uint8_t plo = g_eeprom->read_byte(ee::TCP_SD_PORT);
         uint8_t phi = g_eeprom->read_byte(ee::TCP_SD_PORT + 1);

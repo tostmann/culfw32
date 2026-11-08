@@ -126,11 +126,13 @@ esp_err_t SignalduinoFrontend::start() {
         services_.rf_manager->subscribe(ProtocolId::PulseCapture, [this](const RxEvent& ev) {
             on_rx_event_(ev);
         });
-        // PulseCapture sofort aktivieren, damit Pulse ab jetzt klassifiziert
-        // werden — die emit-Pfade sind no-op solange transports_ leer ist.
-        if (auto e = services_.rf_manager->activate(ProtocolId::PulseCapture, 0); e != ESP_OK) {
-            ESP_LOGW(TAG, "activate PulseCapture: %s", esp_err_to_name(e));
-        }
+        // Slot 0 bleibt beim Start frei. Bis 0.2.11 aktivierte start() hier
+        // PulseCapture bei jedem Boot mit Netz, ohne SIGNALduino-Klienten; das
+        // HMU-Frontend ueberschrieb das direkt danach mit AskSin, seit es beim
+        // Start nichts mehr aktiviert, waere der Stick sonst nach jedem Boot
+        // mit Netz im Pulsempfang (`rf.proto` PulseCap), ohne Netz nicht.
+        // PulseCapture schaltet attach_dynamic_transport() ein, sobald sich
+        // ein Klient verbindet und der Slot frei ist.
     }
 
     for (auto& t : transports_) {
@@ -217,9 +219,10 @@ void SignalduinoFrontend::process_line_(std::span<const char> line, Transport* s
         return;
     }
     if (starts_with_i(line, "XE")) {
-        // Receiver-Enable. PulseCapture laeuft in unserem Modell schon ab
-        // start(), deswegen reicht eine kurze Bestaetigung — manche FHEM-
-        // Versionen ignorieren das, andere wollen einen leeren Echo.
+        // Receiver-Enable. PulseCapture laeuft nur, wenn Slot 0 beim
+        // Verbinden des Klienten frei war (attach_dynamic_transport), sonst
+        // kommen keine Pulse. Wir bestaetigen nur — manche FHEM-Versionen
+        // ignorieren das, andere wollen einen leeren Echo.
         emit_to_(src, "XE\r\n");
         return;
     }
