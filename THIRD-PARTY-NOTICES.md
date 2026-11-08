@@ -49,6 +49,12 @@ filter, calibration and test registers) are the values a-culfw uses for the
 CC1101 (`culfw/clib/mbus/smode_rf_settings.h`, `tmode_rf_settings.h`, Texas
 Instruments origin).
 
+Reception in mode C (`brc`) is written from Texas Instruments application notes
+SWRA522E (combined C-mode and T-mode reception) and TIDU582 (C-mode sync words).
+The output lines (`bY` for frame format B) follow culfw from the SVN repository, and the frame
+format B CRC layout matches the `cul` driver of wmbusmeters, which reads these
+lines; no code was taken from either.
+
 ## 2. Protocol references
 
 The HMUARTLGW and HB-RF-ETH frontends were written independently; the following

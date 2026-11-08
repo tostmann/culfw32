@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Dirk Tostmann
 //
-// CC1101-Registersaetze fuer den wMBus-Empfang, Modus S und T.
+// CC1101-Registersaetze fuer den wMBus-Empfang, Modus S und T. Die T-Tabelle
+// dient auch dem Empfang im Modus C (wmbus_rf.cpp, init_radio): gleiche
+// Frequenz, Chiprate und Sync 0x543D. Der eingestellte Empfangshub (DEVIATN,
+// 38,1 kHz) liegt unter dem nominalen C-Hub von 45 kHz (TI SWRA522E
+// Tabelle 2) wie unter T mit 50 kHz.
 //
 // Normgroessen (prEN 13757-4:2003) mit den Formeln des CC1101-Datenblatts
 // (SWRS061I; f_xosc = 26 MHz): Frequenz (Abschnitt 21), Datenrate (12),

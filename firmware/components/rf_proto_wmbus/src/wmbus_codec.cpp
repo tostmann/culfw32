@@ -5,6 +5,8 @@
 
 #include "wmbus_codec.hpp"
 
+#include <cstring>
+
 namespace culfw32::wmbus {
 
 namespace {
@@ -51,6 +53,25 @@ bool blocks_ok(const uint8_t* p, uint16_t n) {
         len = 16;
     }
     return true;
+}
+
+// len Datenbytes ab p, dahinter ~CRC, High-Byte zuerst.
+bool crc_ok(const uint8_t* p, uint16_t len) {
+    uint16_t crc = 0;
+    for (uint16_t i = 0; i < len; ++i) crc = crc_calc(crc, p[i]);
+    crc = static_cast<uint16_t>(~crc);
+    return p[len] == static_cast<uint8_t>(crc >> 8) &&
+           p[len + 1] == static_cast<uint8_t>(crc);
+}
+
+// Rahmenformat B: Block 1 (L-Feld bis A-Feld) und Block 2 teilen sich einen
+// CRC an Byte 126/127; was danach kommt, traegt einen eigenen CRC am Ende.
+// Kurze Rahmen (<= 128 Bytes) haben nur den einen CRC am Ende.
+bool blocks_b_ok(const uint8_t* p, uint16_t n) {
+    if (n < 12) return false;                          // 10 Bytes Block 1 + CRC
+    if (n <= 128) return crc_ok(p, static_cast<uint16_t>(n - 2));
+    if (n < 130) return false;                         // zweiter CRC passt nicht hinter Byte 127
+    return crc_ok(p, 126) && crc_ok(p + 128, static_cast<uint16_t>(n - 130));
 }
 
 }  // namespace
@@ -127,6 +148,10 @@ uint16_t packet_size(uint8_t l_field) {
     return static_cast<uint16_t>(l_field + 1 + 2 * blocks);
 }
 
+uint16_t packet_size_b(uint8_t l_field) {
+    return static_cast<uint16_t>(l_field + 1);
+}
+
 uint16_t byte_size(uint8_t s_mode, uint8_t transmit, uint16_t pkt_size) {
     // Modus S, Senden: Sync-Rest 0x96 + Daten + Postamble (encode_tx_bytes_smode).
     if (s_mode) return static_cast<uint16_t>(2 * pkt_size + (transmit ? 2 : 0));
@@ -179,6 +204,14 @@ uint16_t decode_rx_bytes_tmode(const uint8_t* in_bytes, uint8_t* out_packet, uin
         return PACKET_CODING_ERROR;
     }
     return blocks_ok(out_packet, pkt_size) ? PACKET_OK : PACKET_CRC_ERROR;
+}
+
+uint16_t decode_rx_bytes_cmode(const uint8_t* in_bytes, uint8_t* out_packet,
+                               uint16_t pkt_size, bool frame_b) {
+    std::memcpy(out_packet, in_bytes, pkt_size);
+    const bool ok = frame_b ? blocks_b_ok(out_packet, pkt_size)
+                            : blocks_ok(out_packet, pkt_size);
+    return ok ? PACKET_OK : PACKET_CRC_ERROR;
 }
 
 }  // namespace culfw32::wmbus

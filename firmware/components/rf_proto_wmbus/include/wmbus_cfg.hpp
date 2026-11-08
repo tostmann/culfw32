@@ -3,6 +3,7 @@
 //
 // CC1101-Konfiguration fuer wMBus Modus S und T (Empfang; die Abweichungen
 // fuers Senden setzt wmbus_rf.cpp) und die FIFO-Konstanten des Funkpfads.
+// Die T-Tabelle traegt auch den Empfang im Modus C (init_radio).
 // Herleitung der Registerwerte: wmbus_cfg.cpp.
 
 #pragma once

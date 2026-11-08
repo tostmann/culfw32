@@ -371,6 +371,8 @@ static void render_native(const RxEvent& ev,
 //   b<hex bytes>[<lqi-hex2><rssi-hex2>]\r\n
 // Slot-Prefix `*` davor analog MULTICC_PREFIX(). RSSI/LQI immer angehaengt
 // (a-culfw default `X21` = REP_KNOWN|REP_RSSI; CULFW32 ist immer "an").
+// Modus C, Rahmenformat B: `bY` statt `b` wie culfw aus dem SVN -- so liest es der
+// cul-Treiber von wmbusmeters (wmbus_cul.cc); Format A sieht aus wie T.
 static void render_wmbus(const RxEvent& ev,
                          const std::vector<std::shared_ptr<Transport>>& transports) {
     auto* f = static_cast<const WmbusFrame*>(ev.payload);
@@ -386,6 +388,7 @@ static void render_wmbus(const RxEvent& ev,
     };
 
     buf[pos++] = 'b';
+    if (f->mode == wmbus::MODE_C && f->frame_b) buf[pos++] = 'Y';
     for (uint16_t i = 0; i < f->len; ++i) append_hex(f->data[i]);
     append_hex(f->lqi_raw);
     append_hex(f->rssi_raw);
@@ -2400,10 +2403,13 @@ void handle_P(std::span<const char> args, Transport* src, uint8_t slot_id,
 
 #ifdef CONFIG_CULFW32_BUILD_RF_WMBUS
 // `b`-Befehl byte-genau a-culfw rf_mbus.c:530 `rf_mbus_func`.
-//   b              -> Status (SMODE/TMODE/OFF + \r\n)
+//   b              -> Status (SMODE/TMODE/CMODE/OFF + \r\n)
 //   br             -> Status (in[2]==0, faellt durch zu mbus_status())
 //   brs            -> Reception on, S-Mode
 //   brt            -> Reception on, T-Mode
+//   brc            -> Reception on, C-Mode samt T-Mode (wie culfw aus dem SVN;
+//                     a-culfw kennt es nicht). C-Rahmen im Format B kommen
+//                     als `bY...` (render_wmbus).
 //   br<other>      -> Reception off
 //   bs<hex>        -> falls in[2]=='s' -> S-Mode-Send;
 //                     falls in[2]=='t' -> T-Mode-Send.
@@ -2422,6 +2428,7 @@ void handle_b(std::span<const char> args, Transport* src, uint8_t slot_id, RfMan
             switch (w->current_mode()) {
                 case wmbus::MODE_S: s = "SMODE\r\n"; break;
                 case wmbus::MODE_T: s = "TMODE\r\n"; break;
+                case wmbus::MODE_C: s = "CMODE\r\n"; break;
                 default: break;
             }
         }
@@ -2436,7 +2443,7 @@ void handle_b(std::span<const char> args, Transport* src, uint8_t slot_id, RfMan
 
     if (args.empty()) { status_line(w); return; }
 
-    // br[s|t|<other>]
+    // br[s|t|c|<other>]
     if (args[0] == 'r') {
         if (args.size() < 2) { status_line(w); return; }
         if (auto e = mgr->activate(ProtocolId::Mbus, slot_id); e != ESP_OK) {
@@ -2448,6 +2455,7 @@ void handle_b(std::span<const char> args, Transport* src, uint8_t slot_id, RfMan
         switch (args[1]) {
             case 's': w->set_mode_smode(); break;
             case 't': w->set_mode_tmode(); break;
+            case 'c': w->set_mode_cmode(); break;
             default:  w->set_off();        break;
         }
         status_line(w);

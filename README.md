@@ -21,10 +21,12 @@ Sub-GHz radio gateway for smart-home stacks such as FHEM, Homegear, debmatic, Ra
 | `F K M T` | SlowRF (FS20 / KS300 / HMS / FHT / EM, OOK) | DONE — FHT sub-features partial |
 | `N` | rf_native (IT+ / PCA301) | DONE |
 | `f` | fastrf (CC1101 P2P 250 kbps GFSK) | DONE |
-| `b` | wMBus T1 / S1 (Wireless M-Bus) | DONE — transmit verified on air against a-culfw |
+| `b` | wMBus T1 / S1 / C1 (Wireless M-Bus; C1 receive only) | DONE — transmit verified on air against a-culfw; C1 receive verified on air with generated frames |
 | signalduino | SIGNALduino-compatible frontend (TCP 2326) | DONE |
 
 > The 433 MHz OOK family (`i k Y L h G`) is excluded from v1 — the current antenna matching is for 868 MHz; a 433 MHz SKU is a follow-on.
+
+**wM-Bus C1.** `brc` receives C1 and T1 at the same time and answers `CMODE`, as culfw from the SVN repository does (a-culfw has no C mode). C1 frames in frame format B are printed as `bY…`, all other frames as `b…`, each with its CRC bytes, LQI and RSSI — the lines the `cul` driver of wmbusmeters reads after `brc`. CULFW32 does not transmit in C mode. Details: [docs/WmbusHowTo.md](docs/WmbusHowTo.md).
 
 **Send credit (duty cycle).** As in a-culfw, `X` shows the send credit in 10 ms units (maximum 900, +1 per second). SlowRF and MAX! transmissions are refused with `LOVF` when it runs out. Unlike a-culfw, AskSin transmissions are debited too (a burst frame costs about 38 units) but never refused, so heavy HomeMatic traffic can make FS20 or MAX! answer `LOVF` until the credit has recovered.
 
@@ -99,7 +101,7 @@ In `idf.py menuconfig` → "CULFW32 Configuration", individual radio classes (As
    - **AP fallback**: `?wifi.mode=2` puts CULFW32 into AP mode (SSID = host name, `culfw32-xxxxxx`), then set the credentials via the web UI.
    - **ASCII**: via USB-CDC `EWs<SSID>` and `EWp<password>`.
 3. Open the **web UI**: `http://<culfw32-ip>` shows the config tab + live terminal.
-4. Optional: connect FHEM/debmatic — see `docs/HmuartlgwHowTo.md` and `docs/DebmaticHowTo.md`.
+4. Optional: connect FHEM/debmatic — see `docs/HmuartlgwHowTo.md` and `docs/DebmaticHowTo.md`; for meters (wM-Bus) see `docs/WmbusHowTo.md`.
 
 ---
 
@@ -110,6 +112,7 @@ In `idf.py menuconfig` → "CULFW32 Configuration", individual radio classes (As
 | [docs/NetworkHowTo.md](docs/NetworkHowTo.md) | WiFi setup, TCP server, allowlist, EW commands |
 | [docs/HmuartlgwHowTo.md](docs/HmuartlgwHowTo.md) | FHEM `HMUARTLGW` connection, HM pairing workflow |
 | [docs/DebmaticHowTo.md](docs/DebmaticHowTo.md) | debmatic / RaspberryMatic via the `hb-rf-eth` tunnel |
+| [docs/WmbusHowTo.md](docs/WmbusHowTo.md) | Wireless M-Bus meters: `b` commands, receive lines, wmbusmeters, FHEM |
 
 Test scripts in `firmware/tools/` cover the protocol classes byte-exact against a local/remote `busware` CUL868. Configuration via environment variables — see `firmware/tools/_lab_env.py`.
 

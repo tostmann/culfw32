@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Dirk Tostmann
 //
 // wMBus T1/S1 RF-Klasse — Vendor-Port a-culfw culfw/clib/rf_mbus.c (D.Tostmann).
+// Empfang im Modus C (C1 samt T1, `brc`) eigenstaendig nach TI SWRA522E.
 
 #include "wmbus_rf.hpp"
 #include "wmbus_cfg.hpp"
@@ -129,6 +130,10 @@ esp_err_t WmbusRF::init_radio(uint8_t mbus_mode, RadioMode rmode) {
     switch (mbus_mode) {
         case wmbus::MODE_S: cfg = wmbus::WMBUS_S_CFG; break;
         case wmbus::MODE_T: cfg = wmbus::WMBUS_T_CFG; break;
+        // Modus C nur im Empfang: gleiche Frequenz, gleiche Chiprate und das
+        // gleiche 16-Chip-Sync-Wort 0x543D wie T (SWRA522E 2.1, 2.3) -- ein
+        // Registersatz nimmt beide Modi an, rx_step trennt sie am ersten Byte.
+        case wmbus::MODE_C: cfg = wmbus::WMBUS_T_CFG; break;
         default: return ESP_OK;  // OFF
     }
     if (auto e = push_cfg(*drv_, cfg); e != ESP_OK) {
@@ -193,6 +198,7 @@ bool WmbusRF::enter_rx(bool force) {
     rxi_.bytes_left = 0;
     rxi_.p_byte     = enc_buf_;
     rxi_.format     = 0;          // INFINITE
+    rxi_.c_frame    = 0;
     rxi_.start      = true;
     rxi_.complete   = false;
 
@@ -273,7 +279,8 @@ void WmbusRF::rx_step() {
             // Takt warten statt bis zum naechsten, sonst wird PKTLEN fuer kurze
             // Rahmen zu spaet geschrieben.  Im S-Mode (16 kbit/s netto) dauern
             // 4 Byte ~2 ms -- dort wuerde das Warten nur Rechenzeit kosten.
-            if (mbus_mode_ == wmbus::MODE_T) {
+            // Modus C laeuft mit derselben Chiprate wie T.
+            if (mbus_mode_ == wmbus::MODE_T || mbus_mode_ == wmbus::MODE_C) {
                 for (uint16_t us = 0; !drv_->gdo0_level() && us < kL3WaitUs; us += 20) {
                     esp_rom_delay_us(20);
                 }
@@ -290,6 +297,24 @@ void WmbusRF::rx_step() {
                     }
                     rxi_.l_field = bytes_decoded[0];
                     rxi_.length  = wmbus::byte_size(1, 0, wmbus::packet_size(rxi_.l_field));
+                } else if (mbus_mode_ == wmbus::MODE_C &&
+                           rxi_.p_byte[0] == wmbus::C_SIGNAL_BYTE) {
+                    // Modus C: Signalbyte, Kennbyte des Rahmenformats, L-Feld;
+                    // der Rahmen folgt ohne Kodierung.  rxi_.length zaehlt ab
+                    // dem Signalbyte.  Mindestlaengen: Format A ein voller
+                    // erster Block (C, M, A), Format B dazu CI und CRC
+                    // (L >= 12 wie culfw aus dem SVN).
+                    rxi_.l_field = rxi_.p_byte[2];
+                    if (rxi_.p_byte[1] == wmbus::C_FRAME_A && rxi_.l_field >= 9) {
+                        rxi_.c_frame = 'A';
+                        rxi_.length  = static_cast<uint16_t>(2 + wmbus::packet_size(rxi_.l_field));
+                    } else if (rxi_.p_byte[1] == wmbus::C_FRAME_B && rxi_.l_field >= 12) {
+                        rxi_.c_frame = 'B';
+                        rxi_.length  = static_cast<uint16_t>(2 + wmbus::packet_size_b(rxi_.l_field));
+                    } else {
+                        rxi_.state = 0;
+                        return;
+                    }
                 } else {
                     if (wmbus::decode_3outof6(rxi_.p_byte, bytes_decoded, 0)
                             != wmbus::DECODING_3OUTOF6_OK) {
@@ -388,8 +413,13 @@ void WmbusRF::rx_step() {
             drv_->read_reg(CC_RXFIFO, lqi);
 
             uint16_t status = wmbus::PACKET_CODING_ERROR;
-            uint16_t pkt_size = wmbus::packet_size(rxi_.l_field);
-            if (mbus_mode_ == wmbus::MODE_S) {
+            const bool frame_b = (rxi_.c_frame == 'B');
+            uint16_t pkt_size = frame_b ? wmbus::packet_size_b(rxi_.l_field)
+                                        : wmbus::packet_size(rxi_.l_field);
+            if (rxi_.c_frame) {
+                // Signal- und Kennbyte stehen vor dem L-Feld.
+                status = wmbus::decode_rx_bytes_cmode(enc_buf_ + 2, pkt_buf_, pkt_size, frame_b);
+            } else if (mbus_mode_ == wmbus::MODE_S) {
                 status = wmbus::decode_rx_bytes_smode(enc_buf_, pkt_buf_, pkt_size);
             } else {
                 status = wmbus::decode_rx_bytes_tmode(enc_buf_, pkt_buf_, pkt_size);
@@ -404,7 +434,10 @@ void WmbusRF::rx_step() {
                                           static_cast<int8_t>(rssi_dbm));
                 // Ausgeben tut rx_task_loop -- ausserhalb der Sperre.
                 out_frame_          = {};
-                out_frame_.mode     = mbus_mode_;
+                // Ein T-Rahmen bleibt auch im Modus C ein T-Rahmen.
+                out_frame_.mode     = rxi_.c_frame ? wmbus::MODE_C
+                                    : (mbus_mode_ == wmbus::MODE_C ? wmbus::MODE_T : mbus_mode_);
+                out_frame_.frame_b  = frame_b ? 1 : 0;
                 out_frame_.len      = pkt_size;
                 out_frame_.rssi_raw = rssi;
                 out_frame_.lqi_raw  = lqi;
@@ -564,6 +597,14 @@ void WmbusRF::set_mode_smode() {
 void WmbusRF::set_mode_tmode() {
     OpLock lk(op_mtx_);
     if (init_radio(wmbus::MODE_T, RadioMode::Rx) == ESP_OK) {
+        enter_rx(true);
+        tick_timer_resume(tick_timer_, kTickUs);
+    }
+}
+
+void WmbusRF::set_mode_cmode() {
+    OpLock lk(op_mtx_);
+    if (init_radio(wmbus::MODE_C, RadioMode::Rx) == ESP_OK) {
         enter_rx(true);
         tick_timer_resume(tick_timer_, kTickUs);
     }

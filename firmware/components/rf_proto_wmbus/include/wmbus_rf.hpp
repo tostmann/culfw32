@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Dirk Tostmann
 //
-// wMBus T1/S1 (Receive + Transmit) auf CC1101.
-// Vendor-Pattern aus a-culfw culfw/clib/rf_mbus.c. RX-State-Machine
+// wMBus T1/S1 (Receive + Transmit) und C1 (nur Receive, zusammen mit T1) auf
+// CC1101. Vendor-Pattern aus a-culfw culfw/clib/rf_mbus.c. RX-State-Machine
 // (RXinfo state 0..3) + TX-FIFO-Refill-Loop, 1:1 portiert auf FreeRTOS.
 
 #pragma once
@@ -16,8 +16,9 @@ namespace culfw32 {
 // Roh-Frame-Buffer-Groessen — a-culfw MBpacket[291] / MBbytes[584].
 struct WmbusFrame {
     static constexpr size_t kMaxPacket = 291;
-    uint8_t  mode;                 // 1=S, 2=T
-    uint16_t len;                  // = packet_size(data[0])
+    uint8_t  mode;                 // 1=S, 2=T, 3=C (T-Rahmen im Modus C: 2)
+    uint8_t  frame_b;              // 1 = Modus C, Rahmenformat B
+    uint16_t len;                  // = packet_size(data[0]) bzw. packet_size_b
     uint8_t  data[kMaxPacket];     // data[0]=L-Field, data[1..]=C/M/A/CI/...
     uint8_t  rssi_raw;
     uint8_t  lqi_raw;
@@ -42,12 +43,14 @@ public:
     // a-culfw rf_mbus.c `rf_mbus_func` Sub-Befehle:
     //   br_off()      -> WMBUS_NONE, RADIO_MODE_NONE  (br / br<other>)
     //   set_mode_*()  -> WMBUS_SMODE/TMODE, RADIO_MODE_RX  (brs / brt)
+    //   set_mode_cmode() -> Modus C samt T (brc; wie culfw aus dem SVN, nicht a-culfw)
     void set_mode_smode();
     void set_mode_tmode();
+    void set_mode_cmode();
     void set_off();
 
     // Aktueller Mode fuer Status-Output (`b` ohne Args):
-    //   0=OFF, 1=SMODE, 2=TMODE.
+    //   0=OFF, 1=SMODE, 2=TMODE, 3=CMODE.
     uint8_t current_mode() const { return mbus_mode_; }
     bool    rx_active()    const { return radio_mode_ == RadioMode::Rx; }
 
@@ -75,7 +78,7 @@ private:
     // rx-Task seine 2-ms-Kadenz. Laeuft nur, solange wMBus die aktive Klasse
     // ist (start()/stop()). Begruendung im Kommentar an rx_task_loop().
     void*         tick_timer_    = nullptr;
-    uint8_t       mbus_mode_     = 0;        // 0=NONE, 1=S, 2=T
+    uint8_t       mbus_mode_     = 0;        // 0=NONE, 1=S, 2=T, 3=C
     RadioMode     radio_mode_    = RadioMode::None;
     // Sperre Frontend <-> RX-Task (SemaphoreHandle_t, Anlage in start()).
     // Begruendung an OpLock in wmbus_rf.cpp.
@@ -102,6 +105,9 @@ private:
         uint16_t bytes_left = 0;
         uint8_t* p_byte    = nullptr;
         uint8_t  format    = 0;     // 0=infinite, 1=fixed
+        // Modus C: 'A' oder 'B' nach Signal- und Kennbyte, sonst 0 (Rahmen
+        // in "3 aus 6" bzw. Manchester).
+        uint8_t  c_frame   = 0;
         bool     start     = true;
         bool     complete  = false;
         uint8_t  state     = 0;
