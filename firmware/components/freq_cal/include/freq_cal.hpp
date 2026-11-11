@@ -4,6 +4,7 @@
 #pragma once
 
 #include "cc1101_driver.hpp"
+#include "rf_protocol.hpp"
 #include "esp_err.h"
 #include <cstdint>
 
@@ -73,18 +74,27 @@ int8_t effective(NvsEeprom* ee, Source& src);
 // Henne-Ei: FREQEST ist erst dann aussagekraeftig, wenn ueberhaupt Signal im
 // Empfaenger ankommt — und bei einem Board, das 44 kHz danebenliegt, wird kein
 // Frame mehr dekodiert, aus dem man samplen koennte. Der Suchlauf loest das,
-// indem er NICHT auf dekodierte Frames wartet, sondern auf Traeger: er faehrt
-// FSCTRL0 in Schritten durch, misst je Schritt RSSI, und sammelt FREQEST immer
-// dann, wenn etwas ueber der Rauschschwelle liegt. Der Offset-Kandidat mit den
-// meisten Treffern gewinnt; sein FREQEST-Median ist die Feinkorrektur.
+// indem er FSCTRL0 in Schritten durchfaehrt und je Schritt zaehlt, wie viele
+// Rahmen die aktive RF-Klasse dekodiert (CC1101Driver::rx_frames()); der
+// FREQEST-Median auf dem Gewinner ist die Feinkorrektur. Der RSSI dient nur
+// noch der Anzeige (Traeger gesehen, aber nichts dekodiert).
 //
 // Voraussetzung ist eine Signalquelle in Reichweite — im Feld die vorhandenen
 // HomeMatic-/MAX!-Geraete, in der Produktion der Referenzsender am Pruefplatz.
 // Ohne Quelle endet der Lauf mit ok=false und laesst den Offset unveraendert.
+//
+// Und eine RF-Klasse, die dekodierte Rahmen meldet: das tun nur AskSin
+// (sample_freqest) und MAX! (note_rx_frame). Mit jeder anderen Klasse oder
+// ohne Klasse — seit 0.2.12 auch nach einem Boot mit Netz, bis ein Klient
+// einen Modus waehlt — zaehlte der Lauf nichts und endete beim Traegerschritt;
+// scan_start() weist ihn dann ab (Review 0212 N4).
+bool scan_supports(const RfProtocol* active);
+
 struct ScanState {
     bool    running   = false;
     bool    finished  = false;
     bool    ok        = false;
+    bool    refused   = false;  // letzter Start abgewiesen: keine AskSin-/MAX!-Klasse aktiv
     int8_t  result    = 0;   // vorgeschlagener neuer FSCTRL0-Wert
     int8_t  best_step = 0;   // Kandidat mit den meisten Treffern
     int8_t  median    = 0;   // FREQEST-Median auf diesem Kandidaten
@@ -93,8 +103,11 @@ struct ScanState {
 };
 
 // Startet den Suchlauf als eigenen Task. dwell_ms = Verweildauer je Schritt.
-// Laeuft nicht neu, solange einer laeuft. Der Aufrufer pollt scan_state().
-esp_err_t scan_start(CC1101Driver& drv, uint32_t dwell_ms = 1200);
+// active = die Klasse auf dem Slot des Treibers (nullptr = keine).
+// ESP_ERR_INVALID_STATE, solange einer laeuft; ESP_ERR_NOT_SUPPORTED, wenn
+// `active` keine Rahmen meldet (scan_supports) — dann steht `refused` im
+// Zustand, bis der naechste Start gelingt. Der Aufrufer pollt scan_state().
+esp_err_t scan_start(CC1101Driver& drv, const RfProtocol* active, uint32_t dwell_ms = 1200);
 ScanState scan_state();
 
 } // namespace freqcal

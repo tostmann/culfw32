@@ -87,8 +87,15 @@ private:
         // Trampoline gegen das schon freigegebene Transport-Objekt (UAF/ABA bei
         // Memory-Reuse → doppelte Hello-Pushes oder Crash).
         void*            hello_timer = nullptr;
-        // true, sobald diese Verbindung einen gueltigen Rahmen geschickt hat und
-        // AskSin auf Slot 0 eingefordert wurde (siehe claim_radio_()).
+        // true, sobald diese Verbindung einen gueltigen Rahmen geschickt hat
+        // (detach_dynamic_transport: nur solche Verbindungen halten die
+        // Peer-Tabelle).
+        bool             frame_seen = false;
+        // true, sobald AskSin fuer diese Verbindung auf Slot 0 stand (claim_radio_()
+        // erfolgreich oder Klasse schon aktiv). Bleibt false, wenn die Aktivierung
+        // fehlschlug — dann versucht es der naechste Rahmen erneut. Bis 0.2.12
+        // war das ein Flag fuer beides, und ein fehlgeschlagener Claim galt als
+        // erledigt (Review 0212 N1).
         bool             radio_claimed = false;
     };
 
@@ -232,8 +239,11 @@ private:
     // Ein echtes Modul empfaengt immer BidCoS. Ist Slot 0 frei (nach dem Boot:
     // start() aktiviert nichts mehr) oder steht er auf einer anderen Klasse
     // (z. B. `X21` ueber den culfw-Port), schaltet der erste gueltige Rahmen
-    // einer HMU-Verbindung auf AskSin. mtx_ gehalten.
-    void claim_radio_();
+    // einer HMU-Verbindung auf AskSin. mtx_ gehalten. true, wenn AskSin danach
+    // aktiv ist; false, wenn die Aktivierung fehlschlug (etwa Slot-Sperre
+    // laenger als 3 s belegt) — der Aufrufer wiederholt dann beim naechsten
+    // Rahmen.
+    bool claim_radio_();
 
     // Peer-Tabelle des HM-MOD-RPI-PCB (Legacy). FHEM verwirft seine eigene
     // Quittung an jedes Geraet, das es dort eingetragen hat (00_HMUARTLGW.pm:
@@ -249,9 +259,10 @@ private:
         // ADD_PEER Byte 5 ("Wakeup?", 00_HMUARTLGW.pm UpdatePeerReq). FHEM
         // setzt es fuer Weck- und Lazy-Config-Geraete, solange Befehle fuer
         // sie anstehen (10_CUL_HM.pm hmInitMsgUpdt: flgs |= 0x02, dann
-        // "init:" -> neues ADD_PEER), und nimmt es danach zurueck. Das Modul
-        // quittiert solche Geraete mit dem Wach-Bit (Flag 0x81), damit sie
-        // auf die Befehle warten — siehe auto_ack_().
+        // "init:" -> neues ADD_PEER), und nimmt es danach zurueck. Solange es
+        // steht, quittiert das Modul einen Weckrahmen (Flag 0x02) dieses
+        // Geraets mit dem Wach-Bit (Flag 0x81), damit es auf die Befehle
+        // wartet; alle anderen Quittungen bleiben 0x80 — siehe auto_ack_().
         bool    wakeup;
     };
     int      peer_index_(const uint8_t* id) const;     // peer_mtx_ MUSS gehalten sein; -1 = unbekannt

@@ -752,6 +752,11 @@ void setup_config_registry(ConfigRegistry& cfg) {
                               static_cast<int>(st.median), static_cast<unsigned>(st.samples),
                               static_cast<int>(st.rssi_dbm), static_cast<int>(st.result),
                               st.result * freqcal::kHzPerLsb);
+            } else if (st.refused) {
+                // Letzter `scan` abgewiesen (Review 0212 N4): der Suchlauf zaehlt
+                // dekodierte Rahmen, und die melden nur AskSin und MAX!.
+                std::snprintf(b, sizeof(b),
+                              "refused: no AskSin/MAX! receive active - select Ar or Zr first");
             } else {
                 std::snprintf(b, sizeof(b), "idle (scan|adopt|apply|reset|clear)");
             }
@@ -768,7 +773,10 @@ void setup_config_registry(ConfigRegistry& cfg) {
                     long d = std::strtol(t.c_str() + 5, &e, 10);
                     if (e && *e == '\0' && d >= 100 && d <= 10000) dwell = static_cast<uint32_t>(d);
                 }
-                return freqcal::scan_start(g_slot0->driver(), dwell) == ESP_OK;
+                // Die aktive Klasse muss dekodierte Rahmen melden (AskSin/MAX!);
+                // sonst weist scan_start ab, und `?rf.freqcal` nennt den Grund.
+                auto active = g_mgr ? g_mgr->active_protocol_on(rfstat::SLOT) : nullptr;
+                return freqcal::scan_start(g_slot0->driver(), active.get(), dwell) == ESP_OK;
             }
             if (t == "adopt") {
                 // Ergebnis des Suchlaufs uebernehmen und persistieren.
@@ -799,7 +807,7 @@ void setup_config_registry(ConfigRegistry& cfg) {
             g_slot0->driver().freqest_reset();
             return true;
         },
-        .help = "Frequency auto-calibration: scan[:dwell_ms] (carrier search) | adopt (take scan result) | apply (take FREQEST median of received frames) | reset | clear",
+        .help = "Frequency auto-calibration: scan[:dwell_ms] (counts decoded frames; needs AskSin (Ar) or MAX! (Zr) receive active) | adopt (take scan result) | apply (take FREQEST median of received frames) | reset | clear",
     });
 
     cfg.register_entry({

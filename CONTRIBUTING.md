@@ -46,3 +46,7 @@ FSCTRL0 in `write_reg()` and restores it after every `SRES`.
   a non-zero value is used as FSCTRL0 as written, `0x00` means the calibration
   applies. This is not implemented yet; as of 0.2.9 a calibrated stick ignores
   `W0E`.
+- `?rf.freqcal=scan` counts the frames the active protocol class decodes per
+  FSCTRL0 step (`CC1101Driver::rx_frames()`). Only AskSin and MAX! report them,
+  so the scan is refused unless one of these classes is receiving (`Ar` or
+  `Zr` first); after a boot nothing is active until a client selects a mode.

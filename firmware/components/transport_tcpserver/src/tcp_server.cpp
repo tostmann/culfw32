@@ -142,6 +142,27 @@ void TcpServer::listen_task_loop() {
         int opt = 1;
         ::setsockopt(cs, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
+        // TCP-Keepalive: ein Klient, der ohne FIN/RST verschwindet (Rechner
+        // stromlos, Netz weg), blieb sonst stehen, bis lwIP eine unquittierte
+        // Sendung aufgab (TCP_MAXRTX = 12 mit Backoff, rechnerisch mehrere
+        // Minuten) -- ohne Sendung unbegrenzt. So lange hielt er seinen
+        // Socket und Empfangs-Worker, und das HMUARTLGW-Frontend quittierte
+        // mit seiner Peer-Tabelle weiter fuer einen Host, den es nicht mehr
+        // gibt. lwIP bricht ab, wenn kKeepIdleS + kKeepCnt * kKeepIntvlS lang
+        // kein Segment mehr kam (tcp_slowtmr, auch bei laufender
+        // Wiederholung); recv() liefert dann einen Fehler und die Verbindung
+        // endet wie bei einem RST. Ein Klient, der haengt, dessen Rechner aber
+        // noch antwortet, bleibt verbunden.
+        constexpr int kKeepIdleS = 60, kKeepIntvlS = 10, kKeepCnt = 6;
+        int v = 1;
+        ::setsockopt(cs, SOL_SOCKET, SO_KEEPALIVE, &v, sizeof(v));
+        v = kKeepIdleS;
+        ::setsockopt(cs, IPPROTO_TCP, TCP_KEEPIDLE, &v, sizeof(v));
+        v = kKeepIntvlS;
+        ::setsockopt(cs, IPPROTO_TCP, TCP_KEEPINTVL, &v, sizeof(v));
+        v = kKeepCnt;
+        ::setsockopt(cs, IPPROTO_TCP, TCP_KEEPCNT, &v, sizeof(v));
+
         ESP_LOGI(TAG, "accepted fd=%d from %s:%u",
                  cs, ipbuf, ntohs(client.sin_port));
 

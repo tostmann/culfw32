@@ -90,8 +90,9 @@ constexpr uint8_t ACK_EINPROGRESS = 0x08;     // beschaeftigt, FHEM wiederholt n
 
 // BidCoS-Rahmen ab dem Laengenbyte: [0]=LEN [1]=CNT [2]=FLAG [3]=TYP
 // [4..6]=Absender [7..9]=Ziel.
-constexpr uint8_t BIDCOS_FLAG_BIDI = 0x20;   // Absender erwartet Quittung
-constexpr uint8_t BIDCOS_FLAG_WKUP = 0x01;   // in der Quittung: Empfaenger bleibt wach
+constexpr uint8_t BIDCOS_FLAG_BIDI   = 0x20; // Absender erwartet Quittung
+constexpr uint8_t BIDCOS_FLAG_WKMEUP = 0x02; // Weckrahmen: Absender ist wach und hoert zu
+constexpr uint8_t BIDCOS_FLAG_WKUP   = 0x01; // in der Quittung: Empfaenger bleibt wach
 constexpr uint8_t BIDCOS_TYPE_ACK  = 0x02;
 
 // RSSI im Format des Moduls: Betrag in dBm, FHEM rechnet `0 - hex()`
@@ -176,6 +177,7 @@ void HmuartlgwFrontend::attach_dynamic_transport(std::shared_ptr<Transport> t, M
                 s.owner  = raw;
                 s.mode   = HostMode::AwaitingProbe;
                 s.module = mode;
+                s.frame_seen    = false;
                 s.radio_claimed = false;
                 s.decoder.reset();
                 break;
@@ -217,6 +219,7 @@ void HmuartlgwFrontend::detach_dynamic_transport(Transport* t) {
     for (auto& pt : per_transport_) {
         if (pt.owner == t) {
             pt.owner = nullptr;
+            pt.frame_seen    = false;
             pt.radio_claimed = false;
             pt.decoder.reset();
             // Pending Hello-Timer fuer diesen Slot stoppen+loeschen — sonst
@@ -227,7 +230,7 @@ void HmuartlgwFrontend::detach_dynamic_transport(Transport* t) {
                 timer_to_kill = pt.hello_timer;
                 pt.hello_timer = nullptr;
             }
-        } else if (pt.owner && pt.module == ModuleMode::Legacy && pt.radio_claimed) {
+        } else if (pt.owner && pt.module == ModuleMode::Legacy && pt.frame_seen) {
             // Nur Verbindungen, die schon einen gueltigen Rahmen geschickt
             // haben: eine stumme auf 2325 haelt die Tabelle nicht fest.
             legacy_left = true;
@@ -346,6 +349,7 @@ void HmuartlgwFrontend::on_rx_data_(std::span<const uint8_t> bytes, Transport* s
         for (auto& slot : per_transport_) {
             if (!slot.owner) {
                 slot.owner = src;
+                slot.frame_seen    = false;
                 slot.radio_claimed = false;
                 pt = &slot;
                 break;
@@ -361,10 +365,16 @@ void HmuartlgwFrontend::on_rx_data_(std::span<const uint8_t> bytes, Transport* s
     pt->decoder.feed(bytes);
     HmuFrame frame;
     while (pt->decoder.try_pop(frame)) {
-        if (!pt->radio_claimed) {
-            pt->radio_claimed = true;
-            claim_radio_();
-        }
+        pt->frame_seen = true;
+        // Umschalten nur beim ersten Rahmen — danach erst wieder ueber
+        // OS_GET_CREDITS und vor dem Senden, damit ein culfw-Klient mit `X21`
+        // bis zum naechsten Credit-Poll umschalten kann (Review 0203 H2).
+        // Schlug die Aktivierung fehl (Slot-Sperre laenger als 3 s belegt, etwa
+        // durch eine lange SIGNALduino-`SR`-Sendung), versucht es der naechste
+        // Rahmen erneut. Bis 0.2.12 galt der Versuch als erledigt, und der
+        // Klient blieb bis zum naechsten OS_GET_CREDITS (FHEM: 15 s) bzw. bei
+        // Dual/HB-RF-ETH bis zur ersten Sendung ohne Empfang (Review 0212 N1).
+        if (!pt->radio_claimed) pt->radio_claimed = claim_radio_();
         dispatch_(frame, src);
     }
 
@@ -1352,18 +1362,20 @@ void HmuartlgwFrontend::note_ack_sent_(const uint8_t* id, uint32_t sent_at_us) {
     if (wake && send_task_) xTaskNotifyGive(static_cast<TaskHandle_t>(send_task_));
 }
 
-void HmuartlgwFrontend::claim_radio_() {
-    if (!services_.rf_manager) return;
+bool HmuartlgwFrontend::claim_radio_() {
+    if (!services_.rf_manager) return false;
     auto active = services_.rf_manager->active_protocol_on(0);
-    if (active && active->id() == ProtocolId::AskSin) return;
+    if (active && active->id() == ProtocolId::AskSin) return true;
     // Bis 0.2.2 schaltete erst das erste APP_SEND um; bis dahin empfing der
     // Stick keine BidCoS-Rahmen (Nutzerbericht 31.10.: nach `X21` keine Thermostat-
     // Meldungen, bis FHEM das erste Mal sendete).
-    if (services_.rf_manager->activate(ProtocolId::AskSin, 0) == ESP_OK) {
+    const esp_err_t e = services_.rf_manager->activate(ProtocolId::AskSin, 0);
+    if (e == ESP_OK) {
         ESP_LOGI(TAG, "slot 0 -> AskSin (HMU client)");
-    } else {
-        ESP_LOGW(TAG, "slot 0 -> AskSin failed");
+        return true;
     }
+    ESP_LOGW(TAG, "slot 0 -> AskSin failed: %s", esp_err_to_name(e));
+    return false;
 }
 
 int HmuartlgwFrontend::peer_index_(const uint8_t* id) const {
@@ -1442,15 +1454,26 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) 
     note_ack_pending_(m + 4, air_start_us);
 
     // Quittung wie FHEM sie baut (CUL_HM: `<cnt> 80 02 <eigene> <Geraet> 00`).
-    // Fuer einen Peer mit Wakeup-Byte im ADD_PEER traegt sie das Wach-Bit
-    // (`81 02`): so quittiert CUL_HM ueber einen CUL, solange Befehle fuer ein
-    // Weck- oder Lazy-Config-Geraet anstehen (10_CUL_HM.pm 3777–3783,
-    // 3791–3797: `8102` nur fuer andere IO-Typen, "HMLAN and HMUARTLGW does it
-    // automatically if configured to lazy config"; 3730–3735: Flag |= 0x01 fuer
-    // jede Quittung, die reine 0x80 ist bei HMUARTLGW uebersprungen). Das Bit
-    // haelt das Geraet wach (AskSinPP Message.h WKUP = 0x01 "keep the device
-    // awake", Device.h: stayAwake 500 ms), bis 0.2.2 schlief es nach der
-    // Quittung sofort wieder ein und FHEMs Befehle liefen ins Leere.
+    // Das Wach-Bit (`81 02`) traegt nur die Quittung auf einen Weckrahmen
+    // (Flag 0x02) eines Peers, dessen ADD_PEER-Wakeup-Byte gesetzt ist, d. h.
+    // solange FHEM Befehle fuer dieses Weck- oder Lazy-Config-Geraet haelt.
+    // So quittiert CUL_HM ueber einen CUL (10_CUL_HM.pm Rev. 26934): `8102`
+    // nur auf einen Rahmen mit mFlgH & 0x22 in CUL_HM_parseCommon (3773–3797,
+    // Lazy-Config-Zweig einmal je Aufwachen, Wakeup-Zweig auf jeden solchen
+    // Rahmen; fuer HMLAN/HMUARTLGW "does it automatically if configured to
+    // lazy config"); reine Quittungen auf die Antworten des Geraets sind
+    // `8002`. Die Zeilen 3730–3735 ("wakeup replacement for acks") berechnen
+    // zwar Flag | 0x01, schreiben es aber nicht in die Quittung zurueck;
+    // wirksam ist dort nur das Weglassen der Quittungen mit Flag 0x80 bei
+    // HMUARTLGW. AskSinPP: Message.h WKUP = 0x01 "send initially to keep the
+    // device awake"; Device.h 347: 500 ms wach, wenn der eigene Rahmen 0x02
+    // trug oder die Quittung 0x01; MultiChannelDevice.h 537: 500 ms nach jeder
+    // empfangenen Nachricht. Ohne das Bit auf dem Weckrahmen schlief das
+    // Geraet bis 0.2.2 sofort wieder ein und FHEMs Befehle liefen ins Leere;
+    // 0.2.5..0.2.12 setzten es auf jede Quittung an einen solchen Peer, bis
+    // FHEM das Byte zuruecknahm, die letzte der Sitzung eingeschlossen
+    // (Nutzerbericht 09.11.2026). Was ein HM-MOD-RPI-PCB hier sendet, ist
+    // nicht gemessen.
     // Zeitpunkt: Rahmenstart + 124 ms, Start zu Start, unabhaengig von der
     // Laenge (Rahmenstart = Sync minus 4 Byte Praeambel). Die eQ-3-Folien
     // nennen fuer BidCoS 125 ms Antwortzeit. Im tsculfw-Mitschnitt vom
@@ -1483,7 +1506,6 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) 
     // RfManager::tx nimmt Slot- und Chipsperre; der RX-Task haelt hier keine
     // (AskSinRF::drain_fifo gibt die Chipsperre vor dem Callback frei). Die
     // Slot-Sperre wartet nur bis kAutoAckLateMs, nicht 3 s (Review 0203 F4).
-    const uint8_t flags = wakeup ? (0x80 | BIDCOS_FLAG_WKUP) : 0x80;
     auto now_us = [] { return static_cast<uint32_t>(esp_timer_get_time()); };
     const uint32_t target = air_start_us + kAutoAckStartUs;
     // Grob vorwarten, bis hoechstens ~20 ms vor dem Ziel: vTaskDelay(n) dauert
@@ -1498,6 +1520,27 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) 
         note_ack_dropped_(m + 4);       // das Geraet wiederholt, Auftraege an es halten
         return;
     }
+    // Peer-Eintrag nach dem Vorwarten noch einmal lesen: zwischen Empfang und
+    // Senden liegen ~100 ms, und der Host hat den Rahmen schon (on_asksin_rx_
+    // schreibt ihn vor dem Quittieren hinaus). Ein ADD_PEER, das in dieser
+    // Zeit das Wakeup-Byte setzt oder zuruecknimmt, gilt so schon fuer diese
+    // Quittung; CUL_HM geht bei gesetztem io{flgs} sofort von der Wach-
+    // Quittung aus (10_CUL_HM.pm Rev. 26934, 3777 ff.). Ist der Peer
+    // inzwischen ausgetragen oder die Tabelle geleert (letzte Verbindung
+    // beendet), entfaellt die Quittung wie bei einem nie eingetragenen Peer.
+    // Es bleibt der Rest bis zum Senden (~20..30 ms, tx() wartet ihn unter der
+    // Chipsperre ab).
+    xSemaphoreTake(peer_mtx_, portMAX_DELAY);
+    const int idx_tx = peer_index_(m + 4);
+    if (idx_tx >= 0) wakeup = peers_[static_cast<size_t>(idx_tx)].wakeup;
+    xSemaphoreGive(peer_mtx_);
+    if (idx_tx < 0) {
+        ESP_LOGI(TAG, "auto-ACK %02X%02X%02X cnt %02X dropped (peer removed)",
+                 m[4], m[5], m[6], m[1]);
+        note_ack_dropped_(m + 4);
+        return;
+    }
+    const uint8_t flags = (wakeup && (m[2] & BIDCOS_FLAG_WKMEUP)) ? (0x80 | BIDCOS_FLAG_WKUP) : 0x80;
     AskSinTxFrame f{};
     f.len = 0x0A;
     f.extra_preamble_ms = 0;            // 4 Byte wie die eQ-3-Sender

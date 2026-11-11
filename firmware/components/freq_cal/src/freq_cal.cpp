@@ -195,15 +195,36 @@ void scan_task(void*) {
 
 } // namespace
 
-esp_err_t scan_start(CC1101Driver& drv, uint32_t dwell_ms) {
+bool scan_supports(const RfProtocol* active) {
+    if (!active) return false;
+    switch (active->id()) {
+        case ProtocolId::AskSin:   // asksin_rf.cpp: sample_freqest() je Rahmen
+        case ProtocolId::Moritz:   // moritz_rf.cpp: note_rx_frame() je Rahmen
+            return true;
+        default:
+            return false;
+    }
+}
+
+esp_err_t scan_start(CC1101Driver& drv, const RfProtocol* active, uint32_t dwell_ms) {
+    // Ohne zaehlende Klasse liefe der Lauf leer und meldete den Traegerschritt
+    // als "no-signal" — nicht zu unterscheiden von einem Board ohne
+    // Gegenstelle. Abweisen und den Grund fuer `?rf.freqcal` festhalten; ein
+    // laufender Suchlauf bleibt davon unberuehrt.
+    const bool supported = scan_supports(active);
     portENTER_CRITICAL(&g_scan_mux);
     bool busy = g_scan.running;
     if (!busy) {
         g_scan = ScanState{};
-        g_scan.running = true;
+        g_scan.running = supported;
+        g_scan.refused = !supported;
     }
     portEXIT_CRITICAL(&g_scan_mux);
     if (busy) return ESP_ERR_INVALID_STATE;
+    if (!supported) {
+        ESP_LOGW(TAG, "freq scan refused: no AskSin/MAX! receive active (select Ar or Zr first)");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
 
     g_scan_drv      = &drv;
     g_scan_dwell_ms = dwell_ms;
