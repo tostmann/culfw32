@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "nvs_eeprom.hpp"
 #include "culfw_ee_addr.hpp"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -90,6 +91,7 @@ constexpr uint8_t ACK_EINPROGRESS = 0x08;     // beschaeftigt, FHEM wiederholt n
 
 // BidCoS-Rahmen ab dem Laengenbyte: [0]=LEN [1]=CNT [2]=FLAG [3]=TYP
 // [4..6]=Absender [7..9]=Ziel.
+constexpr uint8_t BIDCOS_FLAG_RPTED  = 0x40; // Kopie eines Repeaters
 constexpr uint8_t BIDCOS_FLAG_BIDI   = 0x20; // Absender erwartet Quittung
 constexpr uint8_t BIDCOS_FLAG_WKMEUP = 0x02; // Weckrahmen: Absender ist wach und hoert zu
 constexpr uint8_t BIDCOS_FLAG_WKUP   = 0x01; // in der Quittung: Empfaenger bleibt wach
@@ -1422,6 +1424,41 @@ HmuFrame HmuartlgwFrontend::build_peer_reply_(const HmuFrame& req, bool added) c
     return out;
 }
 
+uint32_t HmuartlgwFrontend::frame_key_(const AskSinFrame& af) {
+    // FNV-1a ueber Laenge, Zaehler und alles ab dem Typ (Typ, Absender, Ziel,
+    // Nutzlast); das Flag-Byte data[2] bleibt aussen vor, wie in FHEMs msgX.
+    uint32_t h = 2166136261u;
+    auto mix = [&h](uint8_t b) { h = (h ^ b) * 16777619u; };
+    const size_t n = std::min<size_t>(af.len, AskSinFrame::kMaxPayload - 1);
+    mix(af.data[0]);
+    mix(af.data[1]);
+    for (size_t i = 3; i <= n; ++i) mix(af.data[i]);
+    return h;
+}
+
+bool HmuartlgwFrontend::ack_seen_copy_(uint32_t key, uint32_t copy_start_us) const {
+    const int64_t now = esp_timer_get_time();
+    for (const auto& s : ack_seen_) {
+        if (s.noted_us < 0 || now - s.noted_us > kAckSeenTtlUs || s.key != key) continue;
+        const int32_t d = static_cast<int32_t>(copy_start_us - s.start_us);
+        if (d > 0 && static_cast<uint32_t>(d) <= kCopyWindowUs) return true;
+    }
+    return false;
+}
+
+void HmuartlgwFrontend::ack_seen_note_(uint32_t key, uint32_t orig_start_us) {
+    const int64_t now = esp_timer_get_time();
+    for (auto& s : ack_seen_) {             // derselbe Rahmen (Wiederholung): neu datieren
+        if (s.noted_us >= 0 && now - s.noted_us <= kAckSeenTtlUs && s.key == key) {
+            s.start_us = orig_start_us;
+            s.noted_us = now;
+            return;
+        }
+    }
+    ack_seen_[ack_seen_next_] = {key, orig_start_us, now};
+    ack_seen_next_ = (ack_seen_next_ + 1) % kAckSeen;
+}
+
 void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) {
     // Regeln wie die mCCU-Bruecke (`_selbst_quittieren`, gegen FHEM und einen
     // echten Aktor getestet): nur mit Quittungswunsch, nur an die eigene HMID,
@@ -1439,19 +1476,58 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) 
     const uint8_t type = m[3];
     if (type == BIDCOS_TYPE_ACK || type == 0x03 || type == 0x3F) return;
 
+    // Kopie eines Repeaters (Flag 0x40, kRepeaterDelayUs nach dem Original,
+    // sonst gleich). Ueber einen CUL quittiert FHEM eine Kopie im Regelfall
+    // nicht, wenn es das Original beantwortet hat (10_CUL_HM.pm Rev. 26934,
+    // 2128-2177: Duplikat = gleiche Nummer, Typ, Absender, Ziel und Nutzlast,
+    // ohne Zeitfenster; erneut quittiert nur bei gleichem oberem Flag-Nibble
+    // wie der zuerst beantwortete Rahmen, "not from repeater", und
+    // fruehestens 240 ms nach dessen Antwort). Bis 0.2.13
+    // quittierte der Stick jede Kopie, 124 ms nach ihrem Start -- genau dann,
+    // wenn der Repeater die erste Quittung wiederholt (beide kommen
+    // kRepeaterDelayUs nach ihrem Original). Die Repeater-Kopie der Quittung
+    // ging darin unter (Nutzerbericht 14.11.2026: in tsculfw-Mitschnitten 16
+    // von 16 zweiten Quittungen ohne 0x40 und mit dem Pegel des CUL32).
+    // Jetzt bleibt eine Kopie, deren Original schon behandelt ist (quittiert
+    // oder Quittung verworfen), ohne Quittung, ohne Halten und ohne
+    // Zusatzsendung. Hat der Stick nur die Kopie gehoert, rechnet er auf das
+    // Original zurueck: Quittungszeit, Frist und Halten gelten ab dessen
+    // Start, die Quittung beginnt also 80 ms nach der Kopie, wie sie nach dem
+    // Original begonnen haette. Eine Wiederholung des Geraets (ohne 0x40) wird
+    // weiter immer quittiert: dann hat es die Quittung nicht bekommen. So
+    // quittiert der Stick in drei Faellen, in denen FHEM schweigt, jeweils
+    // zugunsten des Geraets: die Kopie einer nicht gehoerten Wiederholung,
+    // eine Wiederholung nach einer zuerst beantworteten Kopie und eine
+    // Wiederholung binnen 240 ms (Review 0214 N2).
+    const bool     copy       = (m[2] & BIDCOS_FLAG_RPTED) != 0;
+    const uint32_t key        = frame_key_(af);
+    const uint32_t orig_start = copy ? ((air_start_us - kRepeaterDelayUs) | 1u) : air_start_us;
+
     uint8_t own[3];
-    bool    wakeup = false;
+    bool    wakeup  = false;
+    bool    handled = false;
     xSemaphoreTake(peer_mtx_, portMAX_DELAY);
     std::memcpy(own, hmid_, 3);
     const int idx = (std::memcmp(m + 7, own, 3) == 0) ? peer_index_(m + 4) : -1;
-    if (idx >= 0) wakeup = peers_[static_cast<size_t>(idx)].wakeup;
+    if (idx >= 0) {
+        wakeup  = peers_[static_cast<size_t>(idx)].wakeup;
+        // Erst nach der Peer-Pruefung eintragen: ein Original, das vor dem
+        // ADD_PEER kam, gilt nicht als behandelt, seine Kopie wird quittiert.
+        handled = copy && ack_seen_copy_(key, air_start_us);
+        if (!handled) ack_seen_note_(key, orig_start);
+    }
     xSemaphoreGive(peer_mtx_);
     if (idx < 0) return;
+    if (handled) {
+        ESP_LOGD(TAG, "auto-ACK %02X%02X%02X cnt %02X: repeater copy, original already handled",
+                 m[4], m[5], m[6], m[1]);
+        return;
+    }
     // Bis die Quittung raus ist, hoert das Geraet auf nichts anderes: einen
     // Auftrag an es so lange halten (Review 0210 D3; sonst ging ein Versuch,
     // fuer den das Halten nach Verwerfen eben abgelaufen war, noch vor der
     // Quittung seiner Wiederholung raus).
-    note_ack_pending_(m + 4, air_start_us);
+    note_ack_pending_(m + 4, orig_start);
 
     // Quittung wie FHEM sie baut (CUL_HM: `<cnt> 80 02 <eigene> <Geraet> 00`).
     // Das Wach-Bit (`81 02`) traegt nur die Quittung auf einen Weckrahmen
@@ -1506,14 +1582,16 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) 
     // RfManager::tx nimmt Slot- und Chipsperre; der RX-Task haelt hier keine
     // (AskSinRF::drain_fifo gibt die Chipsperre vor dem Callback frei). Die
     // Slot-Sperre wartet nur bis kAutoAckLateMs, nicht 3 s (Review 0203 F4).
+    // Bezug ist orig_start: bei einer reinen Repeater-Kopie der zurueck-
+    // gerechnete Start des Originals, sonst air_start_us.
     auto now_us = [] { return static_cast<uint32_t>(esp_timer_get_time()); };
-    const uint32_t target = air_start_us + kAutoAckStartUs;
+    const uint32_t target = orig_start + kAutoAckStartUs;
     // Grob vorwarten, bis hoechstens ~20 ms vor dem Ziel: vTaskDelay(n) dauert
     // bei 100 Hz 10*(n-1)..10*n ms. Den Rest wartet tx() unter der Chipsperre.
     if (const int32_t r = static_cast<int32_t>(target - now_us()); r > 30'000) {
         vTaskDelay(static_cast<TickType_t>((r / 1000 - 20) / 10));
     }
-    const uint32_t age = (now_us() - air_start_us) / 1000u;
+    const uint32_t age = (now_us() - orig_start) / 1000u;
     if (age >= kAutoAckLateMs) {
         ESP_LOGW(TAG, "auto-ACK %02X%02X%02X cnt %02X skipped, %u ms late",
                  m[4], m[5], m[6], m[1], static_cast<unsigned>(age));
@@ -1549,7 +1627,7 @@ void HmuartlgwFrontend::auto_ack_(const AskSinFrame& af, uint32_t air_start_us) 
     // wenn das CCA den Kanal erst dann freigibt: ein HM-TC-IT-WM-W-EU
     // wiederholte nach ~210 ms (andere Geraete spaeter), eine spaetere Quittung
     // kaeme seiner Wiederholung in die Quere.
-    f.tx_until_us       = (air_start_us + kAutoAckLateMs * 1000u) | 1u;
+    f.tx_until_us       = (orig_start + kAutoAckLateMs * 1000u) | 1u;
     const uint8_t frame[] = {0x0A, m[1], flags, BIDCOS_TYPE_ACK,
                              own[0], own[1], own[2], m[4], m[5], m[6], 0x00};
     std::memcpy(f.data, frame, sizeof(frame));

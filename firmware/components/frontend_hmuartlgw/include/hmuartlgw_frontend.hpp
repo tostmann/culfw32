@@ -271,14 +271,51 @@ private:
     HmuFrame build_peer_reply_(const HmuFrame& req, bool added) const;
     // Rahmen an die eigene HMID mit Quittungswunsch von einem eingetragenen
     // Peer quittieren: die Quittung beginnt (nominell) kAutoAckStartUs nach dem
-    // Start des Rahmens (air_start_us). Ist sie kAutoAckLateMs nach dem
-    // Rahmenstart nicht gesendet (Wartezeit an der Slot-Sperre oder belegter
-    // Kanal im CCA), entfaellt sie.
+    // Start des Rahmens (air_start_us; bei einer Repeater-Kopie ohne gehoertes
+    // Original: des zurueckgerechneten Originals). Ist sie kAutoAckLateMs nach
+    // diesem Start nicht gesendet (Wartezeit an der Slot-Sperre oder belegter
+    // Kanal im CCA), entfaellt sie. Eine Kopie eines schon behandelten
+    // Rahmens bleibt ohne Quittung.
     // Laeuft im AskSin-RX-Task, ohne mtx_, nach der Weitergabe an die Hosts.
     static constexpr uint32_t kAutoAckStartUs = 124'000;
     static constexpr uint32_t kAutoAckLateMs  = 200;
     static_assert(kHoldPendingUs >= kAutoAckLateMs * 1000u, "Halten muss die Quittungsfrist abdecken");
     void     auto_ack_(const struct AskSinFrame& af, uint32_t air_start_us);
+
+    // Repeater-Kopien (Flag 0x40). Ein BidCoS-Repeater sendet einen Rahmen mit
+    // RPTEN (0x80) noch einmal, mit 0x40 und sonst gleich, 44 ms nach dem Start
+    // des Originals: FHEM 00_HMUARTLGW.pm Rev. 25203, Z. 1457 (`$wait -= 0.044
+    // if ($flgh & (1 << 6)); # received from Repeater`), tsculfw-Mitschnitte
+    // eines Nutzers vom 14.11.2026 (40..48 ms Start zu Start bei den Laengen
+    // 0x0A..0x1A, 4-ms-Raster).
+    static constexpr uint32_t kRepeaterDelayUs = 44'000;
+    // So lange nach dem Original gehoert eine Kopie mit gleichem Inhalt zu
+    // diesem. Die Wiederholung eines Geraets kommt erst nach seinem
+    // Quittungsfenster (HM-TC-IT-WM-W-EU nach ~210 ms), ihre Kopie also
+    // fruehestens ~250 ms nach dem Original und wird wieder quittiert.
+    static constexpr uint32_t kCopyWindowUs = 150'000;
+    static_assert(kCopyWindowUs > kRepeaterDelayUs, "Fenster muss die Repeater-Verzoegerung abdecken");
+    // Zuletzt behandelte Rahmen mit Quittungswunsch, nur unter peer_mtx_.
+    // key = frame_key_() ueber den Rahmen ohne Flag-Byte; start_us = Start des
+    // Originals (esp_timer, untere 32 Bit; bei reiner Kopie zurueckgerechnet);
+    // noted_us = esp_timer (64 Bit) beim Eintragen, < 0 = frei. Ein Eintrag
+    // gilt kAckSeenTtlUs lang, so kippt kein 32-Bit-Abstand (Review 0210 D1).
+    struct AckSeen {
+        uint32_t key      = 0;
+        uint32_t start_us = 0;
+        int64_t  noted_us = -1;
+    };
+    static constexpr size_t  kAckSeen      = 8;
+    static constexpr int64_t kAckSeenTtlUs = 1'000'000;
+    AckSeen ack_seen_[kAckSeen]{};
+    size_t  ack_seen_next_ = 0;
+    static uint32_t frame_key_(const struct AskSinFrame& af);
+    // peer_mtx_ MUSS gehalten sein. true = die Kopie (copy_start_us = ihr
+    // eigener Start) gehoert zu einem schon behandelten Rahmen.
+    bool ack_seen_copy_(uint32_t key, uint32_t copy_start_us) const;
+    // peer_mtx_ MUSS gehalten sein. Traegt einen behandelten Rahmen ein bzw.
+    // datiert denselben Rahmen (Wiederholung des Geraets) neu.
+    void ack_seen_note_(uint32_t key, uint32_t orig_start_us);
 
     // RX-Subscription auf AskSinRF — wrappt RxEvent als APP_RECV Frame und
     // broadcastet an alle aktuellen HMUARTLGW-Transports.
@@ -288,9 +325,9 @@ private:
     std::array<PerTransport, kMaxTransports> per_transport_{};
     SemaphoreHandle_t mtx_ = nullptr;
 
-    // Eigene Sperre fuer Peer-Tabelle und hmid_-Schreiben: der RX-Task fragt
-    // sie je Rahmen ab und soll nicht an mtx_ warten, den on_rx_data_ ueber
-    // eine ganze Sendung haelt. Reihenfolge: mtx_ -> peer_mtx_.
+    // Eigene Sperre fuer Peer-Tabelle, hmid_-Schreiben und ack_seen_: der
+    // RX-Task fragt sie je Rahmen ab und soll nicht an mtx_ warten, den
+    // on_rx_data_ ueber eine ganze Sendung haelt. Reihenfolge: mtx_ -> peer_mtx_.
     SemaphoreHandle_t peer_mtx_ = nullptr;
     std::array<Peer, kMaxPeers> peers_{};
     size_t peer_count_ = 0;
