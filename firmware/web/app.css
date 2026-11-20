@@ -75,6 +75,11 @@ body {
 .brand-reset-crash { background: #fde2e2; color: #842020; font-weight: 600; }   /* PANIC/LOCKUP */
 #brand-uptime      { background: #eff6ff; color: #1e40af; }
 .navbar-tabs { display: flex; gap: 0.5rem; }
+/* Reiter brechen nie in sich um ("wM-\nBus" bei ~1140 px); fehlt der Platz,
+   rutscht die ganze Reiterleiste unter das Logo. */
+.navbar { flex-wrap: wrap; gap: 0.5rem; }
+.navbar .navbar-brand { flex-wrap: wrap; row-gap: 0.3rem; }
+.tab { white-space: nowrap; }
 .tab {
   background: transparent;
   border: 1px solid transparent;
@@ -712,7 +717,14 @@ input.setting-input { min-width: 0; }
   .rf-credit-row { grid-template-columns: 1fr; }
   .stats-card .stat-big { font-size: 1.7rem; }
   .send-grid { grid-template-columns: 1fr; gap: 0.3rem; }
+  /* fuenf Reiter passen so auch in 390 px; sonst brechen sie um */
+  .navbar-tabs { flex-wrap: wrap; justify-content: center; gap: 0.3rem; }
+  .tab { padding: 0.4rem 0.7rem; }
+  /* Kopfzeile (Logo, Version, Laufzeit, Badges) bricht um statt links abzuschneiden */
+  .navbar-brand { flex-wrap: wrap; justify-content: center; gap: 0.5rem; }
 }
+/* Build-Zeile im Fuss ist eine lange Liste ohne Leerzeichen */
+#footer-build { overflow-wrap: anywhere; }
 
 /* ============ Firmware / Online-Update ============ */
 .card[hidden], .brand-update[hidden] { display: none; }
@@ -743,3 +755,32 @@ input.setting-input { min-width: 0; }
 button.btn-primary:disabled, button.btn-primary:disabled:hover { background: var(--primary); }
 button.btn-secondary:disabled, button.btn-secondary:disabled:hover { background: #777; }
 button.btn-primary:disabled, button.btn-secondary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ============ wM-Bus-Tab ============ */
+.wmb-modes { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.6rem; }
+.wmb-modes button { margin-right: 0; }
+.wmb-modes button.wmb-active { box-shadow: 0 0 0 3px rgba(116, 184, 54, 0.45); }
+.wmb-status { margin-bottom: 0.4rem; }
+.wmb-status b { min-width: 90px; }
+.wmb-hint { display: block; color: var(--muted); line-height: 1.4; }
+.wmb-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-bottom: 0.6rem; }
+.wmb-tools input[type=text] {
+  flex: 1 1 14rem; min-width: 10rem; padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-family: 'Consolas', 'Menlo', monospace;
+}
+.wmb-tools button.btn-mini { margin-left: 0; margin-right: 0; }
+.wmb-table td { white-space: nowrap; }
+.wmb-table th, .wmb-table td { text-align: left; }
+.wmb-table td.wmb-id { font-family: 'Consolas', 'Menlo', monospace; font-weight: 600; }
+.wmb-table td.wmb-raw {
+  font-family: 'Consolas', 'Menlo', monospace; font-size: 0.75rem; color: var(--muted);
+  max-width: 18rem; overflow: hidden; text-overflow: ellipsis;
+}
+.wmb-table td.wmb-err { color: var(--danger); }
+.wmb-table:not(.grouped) .wmb-n { display: none; }
+.wmb-idle {
+  color: #92400e; background: #fef3c7; border: 1px solid #fcd34d;
+  border-radius: var(--radius); padding: 0.35rem 0.6rem; margin: 0.2rem 0 0.5rem; line-height: 1.4;
+}
+.wmb-idle[hidden] { display: none; }

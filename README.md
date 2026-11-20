@@ -28,6 +28,10 @@ Sub-GHz radio gateway for smart-home stacks such as FHEM, Homegear, debmatic, Ra
 
 **wM-Bus C1.** `brc` receives C1 and T1 at the same time and answers `CMODE`, as culfw from the SVN repository does (a-culfw has no C mode). C1 frames in frame format B are printed as `bY…`, all other frames as `b…`, each with its CRC bytes, LQI and RSSI — the lines the `cul` driver of wmbusmeters reads after `brc`. CULFW32 does not transmit in C mode. Details: [docs/WmbusHowTo.md](docs/WmbusHowTo.md).
 
+**wM-Bus in the web UI.** The tab *wM-Bus* switches reception on (C1 + T1, T1 or S1) and lists every telegram with valid checksums: manufacturer, ID, version, device type, frame, encryption, RSSI and the raw line, optionally one line per meter, with a filter and a CSV download. Telegrams with errors are counted. The tab reads only the unencrypted header, so it shows which meters are in range before any software is set up; meter readings stay encrypted and need a decoder such as wmbusmeters and, for encrypted meters, the key. Starting reception asks first when another protocol uses the radio; *Stop* leaves the radio idle and does not return to that protocol.
+
+![wM-Bus tab of the web UI: the same heat cost allocator every two minutes, a second one in between (meter IDs hidden)](docs/img/webui-wmbus.png)
+
 **Send credit (duty cycle).** As in a-culfw, `X` shows the send credit in 10 ms units (maximum 900, +1 per second). SlowRF and MAX! transmissions are refused with `LOVF` when it runs out. Unlike a-culfw, AskSin transmissions are debited too (a burst frame costs about 38 units) but never refused, so heavy HomeMatic traffic can make FS20 or MAX! answer `LOVF` until the credit has recovered.
 
 **CC1101 settings from the EEPROM.** As in a-culfw, SlowRF loads registers 0x00..0x28 from the EEPROM copy written with `W` (FHEM: frequency, `bWidth`, `rAmpl`, `sens`) whenever the mode starts and on every `X` with a non-zero mask. FSCTRL0 is the exception: the board's frequency calibration always replaces it. The SIGNALduino frontend uses its own fixed register set.
@@ -38,7 +42,7 @@ Sub-GHz radio gateway for smart-home stacks such as FHEM, Homegear, debmatic, Ra
 |---|---|---|
 | ASCII (`culfw`) | USB-CDC, UART, TCP `2323` | FHEM `CUL` module, `socat`, manual use |
 | JSON | TCP `2324`, WebSocket `/ws/json` | web UI, Home Assistant, your own tools |
-| Web UI | HTTP `80` | configuration & live terminal in the browser |
+| Web UI | HTTP `80` | configuration, statistics, wM-Bus reception & live terminal in the browser |
 | HMUARTLGW (FHEM) | TCP `2325` | FHEM `HMUARTLGW` module with `uart://` prefix |
 | HMUARTLGW (DualCoPro) | TCP `2327` + UDP `3008` | debmatic / RaspberryMatic via `hb-rf-eth` |
 | SIGNALduino | TCP `2326` | FHEM `SIGNALduino` module |
@@ -100,7 +104,7 @@ In `idf.py menuconfig` → "CULFW32 Configuration", individual radio classes (As
    - **Improv-Serial**: open `install.busware.de` in the browser (Web Serial API), select CULFW32, enter SSID/PSK.
    - **AP fallback**: `?wifi.mode=2` puts CULFW32 into AP mode (SSID = host name, `culfw32-xxxxxx`), then set the credentials via the web UI.
    - **ASCII**: via USB-CDC `EWs<SSID>` and `EWp<password>`.
-3. Open the **web UI**: `http://<culfw32-ip>` shows the config tab + live terminal.
+3. Open the **web UI**: `http://<culfw32-ip>` shows the tabs Config, Stats, Send, wM-Bus and Terminal.
 4. Optional: connect FHEM/debmatic — see `docs/HmuartlgwHowTo.md` and `docs/DebmaticHowTo.md`; for meters (wM-Bus) see `docs/WmbusHowTo.md`.
 
 ---

@@ -1160,6 +1160,8 @@ void setup_config_registry(ConfigRegistry& cfg) {
         {"dudette", ProtocolId::Dudette},
         {"pulse",  ProtocolId::PulseCapture},
         {"hmip",   ProtocolId::Hmip},
+        // wM-Bus-Tab der Web-UI: ok/fehlerhaft/RSSI/zuletzt ohne `?stats`.
+        {"wmbus",  ProtocolId::Mbus},
     };
     for (const auto& kv : kProtos) {
         const char* name = kv.first;

@@ -64,6 +64,7 @@ test/protomatrix_2026-10-08/
 test/hmu_acktime_2026-11-01/
 test/wmbus_wmbusmeters_2026-11-07/
 test/wmbus_cmode_2026-11-08/
+test/wmbus_webui_2026-11-20/
 
 # Product photos, stored locally — not part of the firmware sources
 /pics/

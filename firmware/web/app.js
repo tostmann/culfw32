@@ -13,6 +13,8 @@ document.querySelectorAll('.tab').forEach(t => {
     document.getElementById('tab-' + t.dataset.tab).classList.add('active');
     // Lazy-Open Terminal-Connection beim ersten Switch
     if (t.dataset.tab === 'terminal' && !termWS) termConnect();
+    // wM-Bus-Tab: eigene tty-Verbindung, bleibt danach offen (Protokoll laeuft weiter)
+    if (t.dataset.tab === 'wmbus') { wmbOpen(); wmbQuery(); wmbRender(); }
   });
 });
 
@@ -131,6 +133,7 @@ function updateValue(key, value) {
   // HF-Frontend-Karte
   if (key === 'rf.chip')      $('rf-chip').textContent     = value;
   if (key === 'rf.proto')     $('rf-proto').textContent    = value;
+  if (key === 'rf.proto' || key.startsWith('stats.wmbus.')) wmbRenderStatus(key === 'rf.proto');
   if (key === 'rf.freq')      $('rf-freq').textContent     = value;
   if (key === 'rf.mod')       $('rf-mod').textContent      = value;
   if (key === 'rf.datarate')  $('rf-datarate').textContent = value;
@@ -321,7 +324,7 @@ function formatBytes(b) {
 
 // Per-Protocol Counter-Tabelle. Eine Zeile pro Protocol mit Zellen aus
 // stats.<proto>.rx_msgs etc.
-const PROTOS = ['moritz','asksin','slowrf','native','fastrf'];
+const PROTOS = ['moritz','asksin','slowrf','native','fastrf','wmbus'];
 function renderProtoTable() {
   const tbody = $('st-proto-tbody');
   if (!tbody) return;
@@ -427,6 +430,7 @@ function renderStatus() {
   });
   renderProtoTable();
   renderOta();
+  wmbRenderStatus(false);
 }
 
 // ============ Netz: Status-Karte + Kopf-Badge ============
@@ -764,6 +768,420 @@ window.downloadJson = () => {
   a.download = 'culfw32-config.json';
   a.click();
 };
+
+// ============ wM-Bus-Tab ============
+// Eigene /ws/tty-Verbindung: schickt die b-Befehle und liest die b-Zeilen
+// (render_wmbus: b|bY + Rahmen samt CRCs + LQI + RSSI). Ausgewertet wird nur,
+// was jeder Empfaenger ohne Schluessel lesen kann: Link-Layer (EN 13757-4) und
+// die CI-Kette ELL/AFL/TPL bis zum Sicherheitsmodus. Zaehlerwerte bleiben
+// verschluesselt; dafuer gibt es wmbusmeters & Co.
+
+// --- wmbus-parser begin (ohne DOM, in Node testbar) ---
+// Geraetetyp (A-Feld, letztes Byte), Namen gekuerzt nach wmbusmeters src/wmbus.cc
+// mediaTypeJSON. 0x0A outlet / 0x0B inlet wie dort, KNX 07_60_01 S. 8 und
+// DPT 20.114; KNX 10_03 Tabelle 1 vertauscht die beiden.
+const WMB_MEDIA = {
+  0x00: 'other', 0x01: 'oil', 0x02: 'electricity', 0x03: 'gas', 0x04: 'heat',
+  0x05: 'steam', 0x06: 'warm water', 0x07: 'water', 0x08: 'heat cost allocator',
+  0x09: 'compressed air', 0x0A: 'cooling (outlet)', 0x0B: 'cooling (inlet)',
+  0x0C: 'heat (inlet)', 0x0D: 'heat/cooling', 0x0E: 'bus/system component', 0x0F: 'unknown',
+  0x15: 'hot water', 0x16: 'cold water', 0x17: 'hot/cold water', 0x18: 'pressure',
+  0x19: 'A/D converter', 0x1A: 'smoke detector', 0x1B: 'room sensor', 0x1C: 'gas detector',
+  0x20: 'breaker', 0x21: 'valve', 0x25: 'display unit', 0x28: 'waste water', 0x29: 'garbage',
+  0x36: 'radio converter (system side)', 0x37: 'radio converter (meter side)',
+};
+// Sicherheitsmodus der TPL (CFG Bit 8..12), Namen wie wmbusmeters
+// LIST_OF_TPL_SECURITY_MODES. Bei Modus 5 und 7 steht in CFG Bit 4..7 die Zahl
+// der verschluesselten 16-Byte-Bloecke (wmbusmeters tpl_num_encr_blocks,
+// KNX 10_03 S. 19); 0 heisst: alles im Klartext.
+const WMB_SEC = {1: 'manufacturer-specific', 2: 'DES', 3: 'DES', 5: 'AES-CBC', 7: 'AES-CBC',
+                 8: 'AES-CTR', 9: 'AES-GCM', 10: 'AES-CCM'};
+
+function wmbHex2(b) { return (b < 16 ? '0' : '') + b.toString(16).toUpperCase(); }
+
+// Rahmenlaenge ohne LQI/RSSI: Format A wie wmbus::packet_size (Block 1 = 10
+// Byte, dann Bloecke zu 16, je 2 CRC-Bytes), Format B wie packet_size_b.
+function wmbPacketSize(L, frameB) {
+  if (frameB) return L + 1;
+  const rest = L > 9 ? L - 9 : 0;
+  return L + 1 + 2 * (1 + Math.floor((rest + 15) / 16));
+}
+
+// CRC-Bytes herausnehmen: Format A wie blocks_ok, Format B wie blocks_b_ok
+// (CRC an Byte 126/127 bei Rahmen ueber 128 Byte, sonst nur am Ende).
+function wmbStripCrc(p, frameB) {
+  const n = p.length;
+  if (frameB) {
+    if (n < 12) return null;
+    if (n <= 128) return p.slice(0, n - 2);
+    if (n < 130) return null;
+    return p.slice(0, 126).concat(p.slice(128, n - 2));
+  }
+  const out = [];
+  let pos = 0, len = 10;
+  while (pos < n) {
+    if (n - pos < 3) return null;
+    if (pos + len + 2 > n) len = n - pos - 2;
+    for (let i = 0; i < len; i++) out.push(p[pos + i]);
+    pos += len + 2;
+    len = 16;
+  }
+  return out;
+}
+
+// Herstellerkennung: drei Buchstaben zu je 5 Bit (EN 13757-4 4.5.2.3, Low-Byte zuerst).
+function wmbMfr(code) {
+  const ch = v => (v >= 1 && v <= 26) ? String.fromCharCode(64 + v) : '?';
+  return ch((code >> 10) & 0x1F) + ch((code >> 5) & 0x1F) + ch(code & 0x1F);
+}
+// Identnummer: 4 Byte BCD, niederwertiges Byte zuerst -> wie auf dem Typschild.
+function wmbId(d, o) { return wmbHex2(d[o + 3]) + wmbHex2(d[o + 2]) + wmbHex2(d[o + 1]) + wmbHex2(d[o]); }
+
+// Eine Ausgabezeile -> Kopf. null = keine b-Zeile; mit .error = b-Zeile, die nicht aufgeht.
+function wmbParseLine(line) {
+  const s = String(line).trim().replace(/^\*+/, '');
+  const m = /^b(Y?)([0-9A-Fa-f]+)$/.exec(s);
+  if (!m) return null;
+  const res = {raw: s, frameB: m[1] === 'Y'};
+  const hex = m[2];
+  if (hex.length % 2) { res.error = 'odd number of hex digits'; return res; }
+  const b = [];
+  for (let i = 0; i < hex.length; i += 2) b.push(parseInt(hex.substr(i, 2), 16));
+  if (b.length < 3) { res.error = 'too short'; return res; }
+  res.lqi = b[b.length - 2] & 0x7F;         // Bit 7 = CRC_OK (SWRS061I Tabelle 28)
+  // wie cc1101_rssi_dbm(): int8 / 2 - 74, ganzzahlig Richtung 0
+  res.rssi = Math.trunc(((b[b.length - 1] << 24) >> 24) / 2) - 74;
+  const p = b.slice(0, b.length - 2);
+  if (p.length !== wmbPacketSize(p[0], res.frameB)) { res.error = 'length does not match the L-field'; return res; }
+  const d = wmbStripCrc(p, res.frameB);
+  if (!d || d.length < 10) { res.error = 'too short'; return res; }   // L = 9: nur C, M, A
+  res.len = d.length;                       // Bytes ohne CRCs, L-Feld mitgezaehlt
+  res.c = d[1];
+  res.mfrCode = d[2] | (d[3] << 8);
+  res.mfr = wmbMfr(res.mfrCode);
+  res.id = wmbId(d, 4);
+  res.ver = d[8];
+  res.type = d[9];
+  res.typeName = WMB_MEDIA[d[9]] || '';
+  res.ci = [];
+  res.sec = null;                           // {layer: 'TPL'|'ELL', mode[, blocks]}
+  let pos = 10;
+  for (let hop = 0; hop < 4 && pos < d.length; hop++) {
+    const ci = d[pos];
+    res.ci.push(ci);
+    if (ci === 0x7A || ci === 0x72) {       // TPL kurz / lang: ACC, STS, CFG
+      let acc = pos + 1;
+      if (ci === 0x72) {                    // eigene Adresse des Zaehlers hinter einem Funkmodul
+        if (pos + 8 < d.length) {
+          res.inner = {id: wmbId(d, pos + 1), mfr: wmbMfr(d[pos + 5] | (d[pos + 6] << 8)),
+                       ver: d[pos + 7], type: d[pos + 8]};
+        }
+        acc = pos + 9;
+      }
+      if (acc + 3 < d.length) res.sec = {layer: 'TPL', mode: d[acc + 3] & 0x1F, blocks: (d[acc + 2] >> 4) & 0x0F};
+      break;
+    }
+    if (ci === 0x78 || ci === 0x79) { res.sec = {layer: 'TPL', mode: 0}; break; }   // ohne TPL-Kopf
+    if (ci === 0x8C) { pos += 3; continue; }                     // ELL I: CC, ACC
+    if (ci === 0x8E) { pos += 11; continue; }                    // ELL III: CC, ACC, M2, A2
+    if (ci === 0x8D || ci === 0x8F) {                            // ELL II/IV: ..., SN, Payload-CRC
+      const sn = (ci === 0x8D) ? pos + 3 : pos + 11;
+      if (sn + 3 >= d.length) break;
+      const enc = (d[sn + 3] >> 5) & 0x07;                       // SN Bit 29..31
+      if (enc) { res.sec = {layer: 'ELL', mode: enc}; break; }   // dahinter verschluesselt
+      pos += (ci === 0x8D) ? 9 : 17;
+      continue;
+    }
+    if (ci === 0x90) {                                           // AFL: Laengenbyte + Felder
+      if (pos + 1 >= d.length) break;
+      pos += 2 + d[pos + 1];
+      continue;
+    }
+    break;                                                       // CI hier nicht ausgewertet
+  }
+  return res;
+}
+
+function wmbSecText(r) {
+  if (r.error) return '';
+  if (!r.ci.length) return 'no payload';
+  if (!r.sec) return 'unknown (CI ' + r.ci.map(wmbHex2).join(' ') + ')';
+  const m = r.sec.mode;
+  if (m === 0) return 'none';
+  if (r.sec.layer === 'ELL') return 'yes (ELL, ' + (m === 1 ? 'AES-CTR' : 'mode ' + m) + ')';
+  const name = WMB_SEC[m] ? ', ' + WMB_SEC[m] : '';
+  if (m === 5 || m === 7) {
+    const n = r.sec.blocks;
+    if (n === 0) return 'none (mode ' + m + ', 0 blocks)';
+    return 'yes (mode ' + m + name + ', ' + n + (n === 1 ? ' block)' : ' blocks)');
+  }
+  return 'yes (mode ' + m + name + ')';
+}
+
+// Rahmenart: bY = C1 Format B; eine b-Zeile im Modus C kann T1 oder C1 Format A sein.
+function wmbFrameText(r, mode) {
+  if (r.frameB) return 'C1 (B)';
+  if (mode === 'TMODE') return 'T1';
+  if (mode === 'SMODE') return 'S1';
+  if (mode === 'CMODE') return 'T1 / C1 (A)';
+  return '';
+}
+// --- wmbus-parser end ---
+
+const WMB_MAX  = 1000;     // Telegramme im Speicher der Seite
+const WMB_SHOW = 300;      // davon hoechstens so viele Zeilen in der Tabelle
+const WMB_MODE_TEXT = {CMODE: 'on, C1 + T1', TMODE: 'on, T1 only', SMODE: 'on, S1 only', OFF: 'off'};
+const WMB_BTN_MODE  = {brc: 'CMODE', brt: 'TMODE', brs: 'SMODE'};
+const WMB_ON = {CMODE: 1, TMODE: 1, SMODE: 1};
+let wmbWS = null, wmbWanted = false, wmbBuf = '', wmbMode = '', wmbProto = null;
+let wmbStopPending = false, wmbMissing = false, wmbRenderTimer = null;
+let wmbLog = [];
+
+function wmbSetConn(s) { const el = $('wmb-conn'); if (el) el.textContent = s; }
+function wmbTabActive() { return $('tab-wmbus').classList.contains('active'); }
+// Waehrend eines Online-Updates keine Zusatzlast: keine Abfragen, keine Neuverbindung.
+function wmbOtaBusy() {
+  const st = cfgValue('ota.state');
+  return st === 'checking' || st === 'installing' || st === 'validating';
+}
+
+function wmbSetMode(m) {
+  wmbMode = m;
+  if (!wmbMissing) $('wmb-mode').textContent = m ? (WMB_MODE_TEXT[m] || m) : '…';
+  document.querySelectorAll('[data-wmb]').forEach(b => {
+    b.classList.toggle('wmb-active', WMB_BTN_MODE[b.dataset.wmb] === m);
+    if (b.dataset.wmb === 'brx') b.disabled = wmbMissing || !(m in WMB_ON);
+  });
+  wmbShowIdle();
+}
+
+// Nach Stop bleibt die Klasse wM-Bus aktiv und der Funk im Leerlauf: sagen, wie es weitergeht.
+function wmbShowIdle() {
+  const el = $('wmb-idle');
+  if (el) el.hidden = !(wmbMode === 'OFF' && cfgValue('rf.proto') === 'wMBus');
+}
+
+// Build ohne wM-Bus-Modul: `b` ist dort unbekannt.
+function wmbSetMissing() {
+  wmbMissing = true;
+  $('wmb-mode').textContent = 'not available in this firmware build';
+  document.querySelectorAll('[data-wmb]').forEach(b => { b.disabled = true; });
+}
+
+function wmbSend(cmd) {
+  wmbOpen();
+  if (wmbWS.readyState === WebSocket.OPEN) wmbWS.send(cmd + '\r\n');
+  else wmbWS.addEventListener('open', () => wmbWS && wmbWS.send(cmd + '\r\n'), {once: true});
+}
+function wmbQuery() { if (wmbWS && wmbWS.readyState === WebSocket.OPEN) wmbWS.send('b\r\n'); }
+
+function wmbOpen() {
+  wmbWanted = true;
+  if (!wmbWS) wmbConnect();
+}
+
+function wmbConnect() {
+  wmbSetConn('connecting …');
+  wmbBuf = '';
+  wmbWS = new WebSocket(wsURL('/ws/tty'));
+  wmbWS.onopen = () => { wmbSetConn('connected'); wmbWS.send('b\r\n'); };   // Status abfragen
+  wmbWS.onmessage = ev => { if (typeof ev.data === 'string') wmbFeed(ev.data); };
+  wmbWS.onclose = () => {
+    wmbSetConn('disconnected, retrying');
+    wmbWS = null;
+    wmbStopPending = false;
+    wmbSetMode('');                         // Modus unbekannt -> Stop gesperrt
+    if (wmbWanted) wmbRetry();
+  };
+  wmbWS.onerror = () => { /* close folgt */ };
+}
+function wmbRetry() {
+  setTimeout(() => {
+    if (wmbWS) return;
+    if (wmbOtaBusy()) { wmbRetry(); return; }   // erst nach dem Update neu verbinden
+    wmbConnect();
+  }, 2000);
+}
+
+// Ein WS-Paket ist nicht eine Zeile: sammeln und an \n schneiden.
+function wmbFeed(text) {
+  wmbBuf += text;
+  const parts = wmbBuf.split('\n');
+  wmbBuf = parts.pop();
+  if (wmbBuf.length > 2000) wmbBuf = '';    // eine b-Zeile hat hoechstens ~590 Zeichen
+  let added = false;
+  parts.forEach(l => {
+    const s = l.replace(/\r$/, '').trim().replace(/^\*+/, '');
+    if (/^(SMODE|TMODE|CMODE|OFF)$/.test(s)) {
+      wmbSetMode(s);
+      // Stop zweistufig: brx erst, wenn der Stick selbst meldet, dass wM-Bus empfaengt.
+      // `br<x>` aktiviert vorher die wM-Bus-Klasse und naehme sonst einer anderen den Funk.
+      if (wmbStopPending) {
+        wmbStopPending = false;
+        if (s in WMB_ON && wmbWS) wmbWS.send('brx\r\n');
+      }
+      return;
+    }
+    if (/^br? ERR/.test(s)) { $('wmb-mode').textContent = s; return; }
+    if (/^\? \(b\w* is unknown\)/.test(s)) { wmbSetMissing(); return; }
+    const r = wmbParseLine(s);
+    if (!r) return;
+    r.time = new Date();
+    r.frame = wmbFrameText(r, wmbMode);
+    wmbLog.push(r);
+    if (wmbLog.length > WMB_MAX) wmbLog.shift();
+    added = true;
+  });
+  if (added) { wmbScheduleRender(); wmbPullStats(); }
+}
+
+// Die Zaehler kommen sonst nur mit dem Live-Push (bis zu einigen Sekunden alt);
+// nach neuen Telegrammen einmal gezielt holen, hoechstens alle 1,5 s.
+let wmbStatsTimer = null;
+function wmbPullStats() {
+  if (wmbStatsTimer) return;
+  wmbStatsTimer = setTimeout(() => {
+    wmbStatsTimer = null;
+    if (!cfgWS || cfgWS.readyState !== WebSocket.OPEN || wmbOtaBusy()) return;
+    ['stats.wmbus.rx_msgs', 'stats.wmbus.crc_err', 'stats.wmbus.last_rssi', 'stats.wmbus.last_rx_ago']
+      .forEach(k => cfgWS.send(JSON.stringify({cmd: 'get', key: k})));
+  }, 1500);
+}
+
+// Nicht je Telegramm neu zeichnen: hoechstens alle 300 ms und nur bei sichtbarem
+// Tab; beim Wechsel in den Tab zeichnet der Tab-Handler nach.
+function wmbScheduleRender() {
+  if (wmbRenderTimer) return;
+  wmbRenderTimer = setTimeout(() => {
+    wmbRenderTimer = null;
+    if (wmbTabActive()) wmbRender();
+  }, 300);
+}
+
+// Zeilen fuer die Tabelle: Protokoll (neueste oben) oder je Zaehler eine Zeile.
+function wmbRows(grouped) {
+  const f = ($('wmb-filter').value || '').trim().toUpperCase();
+  const hit = r => !f || [r.mfr, r.id, r.typeName, r.inner ? r.inner.id : '', r.error || '']
+    .join(' ').toUpperCase().includes(f);
+  const rows = wmbLog.filter(hit);
+  if (!grouped) return {rows: rows.slice(-WMB_SHOW).reverse(), matched: rows.length};
+  const by = new Map();
+  rows.forEach(r => {
+    const k = r.error ? 'err' : r.mfr + r.id + '/' + r.ver + '/' + r.type;
+    const g = by.get(k);
+    if (g) { g.count++; g.last = r; g.frames.add(r.frame); }
+    else by.set(k, {count: 1, last: r, frames: new Set([r.frame])});
+  });
+  // Rahmenart: alle, in denen der Zaehler gehoert wurde, nicht nur die letzte
+  const groups = [...by.values()].sort((a, b) => b.last.time - a.last.time)
+    .slice(0, WMB_SHOW).map(g => Object.assign({}, g.last,
+      {count: g.count, frame: [...g.frames].filter(Boolean).join(', ')}));
+  return {rows: groups, matched: rows.length, meters: by.size};
+}
+
+function wmbRender() {
+  const tbody = $('wmb-tbody');
+  if (!tbody) return;
+  const grouped = $('wmb-group').checked;
+  const filtered = !!($('wmb-filter').value || '').trim();
+  const {rows, matched, meters} = wmbRows(grouped);
+  const n = wmbLog.length;
+  let txt = n + (n === 1 ? ' telegram' : ' telegrams');
+  if (filtered) txt += ', ' + matched + ' match';
+  if (grouped) txt += ', ' + meters + (meters === 1 ? ' meter' : ' meters');
+  else if (matched > WMB_SHOW) txt += ', showing the newest ' + WMB_SHOW;
+  $('wmb-count').textContent = txt;
+  document.querySelector('.wmb-table').classList.toggle('grouped', grouped);
+  tbody.textContent = '';
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    const cells = r.error ? [
+      [r.time.toLocaleTimeString()], ['?'], [''], [''], [r.error, 'wmb-err'], [r.frameB ? 'C1 (B)' : ''],
+      [''], [r.rssi !== undefined ? r.rssi + ' dBm' : ''], [''], [r.count ? String(r.count) : '', 'wmb-n'],
+      [r.raw, 'wmb-raw', r.raw],
+    ] : [
+      [r.time.toLocaleTimeString()],
+      [r.mfr, '', 'manufacturer code 0x' + wmbHex2(r.mfrCode >> 8) + wmbHex2(r.mfrCode & 0xFF)],
+      [r.id, 'wmb-id', r.inner ? 'meter behind the radio module: ' + r.inner.mfr + ' ' + r.inner.id : ''],
+      [wmbHex2(r.ver)],
+      [r.typeName || '0x' + wmbHex2(r.type), '', 'device type 0x' + wmbHex2(r.type)],
+      [r.frame],
+      [wmbSecText(r)],
+      [r.rssi + ' dBm', rssiClass(String(r.rssi))],
+      [String(r.len)],
+      [r.count ? String(r.count) : '', 'wmb-n'],
+      [r.raw, 'wmb-raw', r.raw],
+    ];
+    cells.forEach(([text, cls, title]) => {
+      const td = document.createElement('td');
+      td.textContent = text;
+      if (cls) td.className = cls;
+      if (title) td.title = title;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+// Zaehler aus der Registry (stats.wmbus.*, Live-Push alle 5 s) und aktive Funkklasse.
+function wmbRenderStatus(protoChanged) {
+  if (!$('wmb-ok')) return;
+  const proto = cfgValue('rf.proto');
+  $('wmb-proto').textContent = proto || '…';
+  $('wmb-ok').textContent  = cfgValue('stats.wmbus.rx_msgs') || '0';
+  $('wmb-bad').textContent = cfgValue('stats.wmbus.crc_err') || '0';
+  const ago  = cfgValue('stats.wmbus.last_rx_ago') || 'n/a';
+  const rssi = cfgValue('stats.wmbus.last_rssi') || 'n/a';
+  $('wmb-last').textContent = ago === 'n/a' ? 'never' : formatAgo(ago) + ' ago';
+  $('wmb-rssi').textContent = rssi === 'n/a' ? 'no RSSI yet' : rssi + ' dBm';
+  wmbShowIdle();
+  // Hat jemand anderes die Funkklasse gewechselt, den Empfangsmodus neu erfragen.
+  if (protoChanged && proto !== wmbProto && wmbWS && wmbWS.readyState === WebSocket.OPEN) wmbWS.send('b\r\n');
+  wmbProto = proto;
+}
+
+// Start: Empfaengt gerade eine andere Funkklasse, nicht stillschweigend uebernehmen.
+function wmbStart(cmd) {
+  const proto = cfgValue('rf.proto');
+  if (proto && proto !== 'none' && proto !== 'wMBus' && proto !== '?' &&
+      !confirm('The radio is used for ' + proto + ' right now. Starting wM-Bus reception stops ' + proto +
+               ' until the host software switches it back, you send X21, Ar or Zr in the Terminal tab,' +
+               ' or the stick restarts.\n\nStart wM-Bus reception?')) {
+    return;
+  }
+  wmbSend(cmd);
+}
+// Stop: erst den Modus erfragen; brx schickt wmbFeed nur bei laufendem wM-Bus-Empfang.
+function wmbStop() {
+  wmbStopPending = true;
+  wmbSend('b');
+}
+
+document.querySelectorAll('[data-wmb]').forEach(b => b.addEventListener('click', () => {
+  if (b.dataset.wmb === 'brx') wmbStop();
+  else wmbStart(b.dataset.wmb);
+}));
+$('wmb-group').addEventListener('change', wmbRender);
+$('wmb-filter').addEventListener('input', wmbRender);
+$('wmb-clear').addEventListener('click', () => { wmbLog = []; wmbRender(); });
+$('wmb-csv').addEventListener('click', () => {
+  const q = v => '"' + String(v === undefined || v === null ? '' : v).replace(/"/g, '""') + '"';
+  const out = ['time,manufacturer,id,version,type,frame,encryption,rssi_dbm,lqi,length,raw'];
+  wmbLog.forEach(r => out.push([
+    r.time.toISOString(), r.error ? '' : r.mfr, r.error ? '' : r.id, r.error ? '' : wmbHex2(r.ver),
+    r.error ? r.error : (r.typeName || '0x' + wmbHex2(r.type)), r.frame, wmbSecText(r),
+    r.rssi, r.lqi, r.len, r.raw,
+  ].map(q).join(',')));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([out.join('\r\n') + '\r\n'], {type: 'text/csv'}));
+  a.download = 'culfw32-wmbus-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.csv';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+// Modus nachfragen, solange der Tab offen ist (FHEM oder ein Terminal kann ihn umstellen).
+setInterval(() => {
+  if (wmbWS && wmbWS.readyState === WebSocket.OPEN && wmbTabActive() && !wmbOtaBusy()) wmbWS.send('b\r\n');
+}, 15000);
 
 // ============ Terminal-Connection (TTY-Tab) ============
 let termWS = null;

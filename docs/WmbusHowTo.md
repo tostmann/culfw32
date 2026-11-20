@@ -35,6 +35,21 @@ Frame format A carries a CRC after the first 10 bytes and after every further 16
 
 ---
 
+## Web UI
+
+The tab *wM-Bus* of the web UI (`http://<stick-ip>`) starts reception with buttons for `brc`, `brt` and `brs` and lists every received telegram with manufacturer, ID, version, device type, frame, encryption, RSSI and the raw line, optionally one line per meter. It reads only the unencrypted header, so it answers whether a meter is in range before any host software is set up; readings need one of the decoders below. The log lives in the open browser page (up to 1000 telegrams); the CSV download keeps it.
+
+- Starting a mode asks first if another protocol is using the radio, because wM-Bus reception stops it.
+- Stop switches the receiver off and leaves the radio idle; it does not return to the protocol used before. Switch back from the host software, with `X21`, `Ar` or `Zr` in the Terminal tab, or by restarting the stick. The reception mode does not survive a restart either.
+- Stop sends `brx` only after the stick has answered that wM-Bus is receiving, because `br` + any other letter first switches the radio to wM-Bus.
+- In mode `brc` a `b…` line can be T1 or C1 in frame format A; the tab shows `T1 / C1 (A)`. Only `bY…` is certain (C1, frame format B).
+- The error counter also counts noise that began like a telegram.
+- In security modes 5 and 7 the tab shows how many 16-byte blocks are encrypted; with 0 blocks the telegram is plain text.
+
+![wM-Bus tab (meter IDs hidden)](img/webui-wmbus.png)
+
+---
+
 ## wmbusmeters
 
 wmbusmeters reads a CUL from a serial device. With the stick on USB:

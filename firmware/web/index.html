@@ -7,7 +7,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CULFW32</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2374b836'/%3E%3Ctext x='10' y='42' font-family='Verdana' font-size='28' font-weight='bold' fill='white'%3E32%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/app.css?v=5">
+<link rel="stylesheet" href="/app.css?v=6">
 </head>
 <body>
 <nav class="navbar">
@@ -24,6 +24,7 @@
     <button class="tab active" data-tab="config">Config</button>
     <button class="tab" data-tab="stats">Stats</button>
     <button class="tab" data-tab="send">Send</button>
+    <button class="tab" data-tab="wmbus">wM-Bus</button>
     <button class="tab" data-tab="terminal">Terminal</button>
   </div>
 </nav>
@@ -327,6 +328,66 @@
     </div>
   </section>
 
+  <!-- ============== wM-Bus Tab ==============
+       Empfang ein/aus (b-Befehle ueber /ws/tty) und Protokoll der empfangenen
+       Telegramme. Ausgewertet wird nur der unverschluesselte Kopf der b-Zeilen
+       (app.js, wmbParseLine); Zaehlerstaende entschluesselt der Stick nicht. -->
+  <section id="tab-wmbus" class="tab-panel">
+    <div class="card">
+      <div class="card-header">wM-Bus reception
+        <small class="card-sub" id="wmb-conn">disconnected</small>
+      </div>
+      <div class="card-body">
+        <div class="wmb-modes">
+          <button class="btn-primary"   data-wmb="brc" title="C1 and T1 at the same time (brc)">Start C1 + T1</button>
+          <button class="btn-secondary" data-wmb="brt" title="T1 only (brt)">T1 only</button>
+          <button class="btn-secondary" data-wmb="brs" title="S1 only (brs)">S1</button>
+          <button class="btn-secondary" data-wmb="brx" title="Reception off (brx)" disabled>Stop</button>
+        </div>
+        <div class="wmb-status">
+          <div><b>Receiver</b> <span id="wmb-mode">…</span></div>
+          <div><b>Radio</b> <span id="wmb-proto">…</span></div>
+          <div><b>Telegrams</b> <span id="wmb-ok">0</span> received, <span id="wmb-bad">0</span> with errors <small>(since boot)</small></div>
+          <div><b>Last</b> <span id="wmb-last">never</span>, <span id="wmb-rssi">n/a</span></div>
+        </div>
+        <div id="wmb-idle" class="wmb-idle" hidden>Radio idle: no protocol is receiving. Start a mode above,
+          let the host software switch back, send X21, Ar or Zr in the Terminal tab, or restart the stick.</div>
+        <small class="wmb-hint">Starting wM-Bus reception takes the radio away from the other protocols
+          (HomeMatic, MAX!, FS20, …). Stop switches the receiver off but does not return to the protocol used
+          before, and the mode does not survive a restart. The list shows every telegram with valid checksums;
+          telegrams with errors (also noise that began like a telegram) are only counted. Only the unencrypted
+          header is shown here: reading meter values needs software such as wmbusmeters and, for encrypted
+          meters, the key.</small>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">Received telegrams
+        <small class="card-sub" id="wmb-count">0 telegrams</small>
+      </div>
+      <div class="card-body">
+        <div class="wmb-tools">
+          <label><input type="checkbox" id="wmb-group"> one line per meter</label>
+          <input id="wmb-filter" type="text" placeholder="filter: ID, manufacturer, type"
+                 spellcheck="false" autocomplete="off">
+          <button class="btn-mini" id="wmb-csv" title="All telegrams of this page as CSV">download CSV</button>
+          <button class="btn-mini" id="wmb-clear">clear</button>
+        </div>
+        <div class="proto-table-wrap">
+          <table class="proto-table wmb-table">
+            <thead>
+              <tr>
+                <th>Time</th><th>Manuf.</th><th>ID</th><th>Ver</th><th>Type</th><th>Frame</th>
+                <th>Encryption</th><th>RSSI</th><th>Len</th><th class="wmb-n">Count</th><th>Raw</th>
+              </tr>
+            </thead>
+            <tbody id="wmb-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ============== Terminal Tab ============== -->
   <section id="tab-terminal" class="tab-panel">
     <div class="card terminal-card">
@@ -359,6 +420,6 @@
   <span id="footer-build">…</span>
 </footer>
 
-<script src="/app.js?v=6"></script>
+<script src="/app.js?v=7"></script>
 </body>
 </html>
