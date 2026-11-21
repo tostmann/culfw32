@@ -40,7 +40,7 @@ Sub-GHz radio gateway for smart-home stacks such as FHEM, Homegear, debmatic, Ra
 
 | Path | Port / transport | Use case |
 |---|---|---|
-| ASCII (`culfw`) | USB-CDC, UART, TCP `2323` | FHEM `CUL` module, `socat`, manual use |
+| ASCII (`culfw`) | USB-CDC, UART0 (off by default), TCP `2323` | FHEM `CUL` module, `socat`, manual use |
 | JSON | TCP `2324`, WebSocket `/ws/json` | web UI, Home Assistant, your own tools |
 | Web UI | HTTP `80` | configuration, statistics, wM-Bus reception & live terminal in the browser |
 | HMUARTLGW (FHEM) | TCP `2325` | FHEM `HMUARTLGW` module with `uart://` prefix |
@@ -54,7 +54,7 @@ Several frontends run **at the same time** on the same stick — e.g. FHEM on 23
 
 - **ESP32-C6**: WiFi 6 (2.4 GHz), Bluetooth LE, Matter / Thread / Zigbee-capable (radio stacks for later extension)
 - **CC1101**: 868 MHz sub-GHz transceiver, FSK + OOK
-- **USB-C**: power, console (USB-Serial-JTAG), UART0 in parallel on the SBU pads
+- **USB-C**: power, console (USB-Serial-JTAG), UART0 on the SBU pads (off by default, `?uart.enable=1`, see [docs/NetworkHowTo.md](docs/NetworkHowTo.md))
 - **Flash 4 MB**: dual OTA slots (1.75 MB ota_0 + 1.75 MB ota_1) + 384 KB SPIFFS
 - **OTA update**: wireless via the web UI or the JSON frontend
 

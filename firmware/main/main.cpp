@@ -349,6 +349,10 @@ OtaUpdate::NetHealth ota_net_health() {
 
 bool ota_auto_enabled() { return g_eeprom && g_eeprom->read_byte(ee::OTA_AUTO) == 1; }
 #endif
+#ifdef CONFIG_CULFW32_BUILD_TRANSPORT_UART
+// UART0-Transport nur auf Wunsch (ee::UART_ENABLE == 1), sonst aus.
+bool uart_enabled() { return g_eeprom && g_eeprom->read_byte(ee::UART_ENABLE) == 1; }
+#endif
 
 void setup_config_registry(ConfigRegistry& cfg) {
     using E = ConfigEntry;
@@ -622,11 +626,12 @@ void setup_config_registry(ConfigRegistry& cfg) {
             if (g_hbrfeth) g_hbrfeth->set_module_identity(m == ee::HMU_MODULE_DUAL);
             return true;
         },
-        .help = "HMUARTLGW default mode for statically bound transports "
-                "(USB-CDC, UART): 0=hm-mod-rpi-pcb (FHEM/Homegear, default), "
-                "1=rpi-rf-mod (DualCoPro). The TCP listeners on hmu.port (legacy) "
-                "and hmu.port+2 (dual) keep their own fixed identity, so both "
-                "modes are available at the same time without switching.",
+        // Hoechstens 248 Zeichen: `?hmu.module` gibt die Hilfe ueber einen
+        // 256-Byte-Puffer aus (frontend_culfw, "?    " + Text + CRLF).
+        .help = "HMUARTLGW mode for statically bound transports (USB-CDC, UART0 if on): "
+                "0=hm-mod-rpi-pcb (FHEM/Homegear, default), 1=rpi-rf-mod (DualCoPro). "
+                "TCP listeners hmu.port (legacy) and hmu.port+2 (dual) keep their own "
+                "identity; both run at once.",
     });
 #endif
 
@@ -1035,6 +1040,23 @@ void setup_config_registry(ConfigRegistry& cfg) {
             return true;
         },
         .help = "Update manifest URL (RAM only, 'default' restores the built-in one)",
+    });
+#endif
+#ifdef CONFIG_CULFW32_BUILD_TRANSPORT_UART
+    cfg.register_entry({
+        .key  = "uart.enable", .type = T::IntEnum, .flags = E::FLAG_PERSIST,
+        .min_val = 0, .max_val = 1,
+        .enum_labels = {"off", "on"},
+        .getter = [] { return std::string{uart_enabled() ? "1" : "0"}; },
+        .setter = [](std::string_view v) {
+            uint32_t m = 0;
+            if (!parse_uint(v, m, 1) || !g_eeprom) return false;
+            return g_eeprom->write_byte(ee::UART_ENABLE, static_cast<uint8_t>(m)) == ESP_OK;
+        },
+        .help = "culfw interface on UART0 (USB-C SBU1/SBU2, 38400 8N1): 1 = on, "
+                "0 = off (default). Stored setting, takes effect after a restart "
+                "(B00); with the Ethernet board at J1 UART0 stays off (GPIO17 is "
+                "its chip select)",
     });
 #endif
 
@@ -1650,9 +1672,14 @@ extern "C" void app_main(void) {
     // Zweiter Transport: UART0 ueber USB-C SBU1/SBU2 nach aussen — damit ein
     // benachbarter Mikrocontroller die culfw-Daten direkt seriell mitlesen kann.
     // Mit gesteckter W5500-Platine ist GPIO17 deren SCSn, nicht U0RXD.
-    bool uart_ok = true;
+    // Nur, wenn uart.enable = 1 (bis 0.2.20 lief er immer): der Transport
+    // schreibt mit 38400 Baud blockierend, sobald sein 1-KB-Puffer voll ist,
+    // und der RX-Task einer Funkklasse wartete darin -- der wM-Bus-Empfang
+    // lief gemessen genau mit der UART-Rate (6,6 lange Zeilen/s).
+    bool uart_ok = uart_enabled();
+    if (!uart_ok) ESP_LOGI(TAG, "UART0 transport off (uart.enable = 0)");
 #ifdef CONFIG_CULFW32_BUILD_NET_W5500
-    if (g_eth && g_eth->present() &&
+    if (uart_ok && g_eth && g_eth->present() &&
         (CONFIG_CULFW32_UART_PIN_RX == CONFIG_CULFW32_W5500_PIN_CS ||
          CONFIG_CULFW32_UART_PIN_TX == CONFIG_CULFW32_W5500_PIN_CS)) {
         uart_ok = false;

@@ -89,7 +89,8 @@ menu "CULFW32 — Modul-Auswahl"
             default y
             help
                 Zweiter Transport fuer benachbarten Mikrocontroller via SBU-Pads.
-                ~5 KB Code.
+                Eingebaut, aber zur Laufzeit per Vorgabe aus: einschalten mit
+                `?uart.enable=1` und Neustart (EEPROM-Byte 0x15C). ~5 KB Code.
 
         config CULFW32_BUILD_TRANSPORT_TCP
             bool "TCP-Server (Port konfigurierbar via EWP)"

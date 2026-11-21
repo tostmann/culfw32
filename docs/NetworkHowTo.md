@@ -3,7 +3,7 @@
 CULFW32 speaks the culfw protocol over several transports **at the same time**:
 
 - **USB-CDC** (via the ESP32-C6 USB-C connector)
-- **UART0** (via the SBU1/SBU2 pins of the USB-C socket, 38400 8N1) — for a neighboring microcontroller
+- **UART0** (via the SBU1/SBU2 pins of the USB-C socket, 38400 8N1) — for a neighboring microcontroller; off by default, switch it on with `?uart.enable=1` and a restart (`B00`); the factory reset `e` keeps this setting. With the Ethernet board at J1 it stays off, because GPIO17 is the board's chip select. At 38400 baud a burst of long receive lines fills its buffer, and the stick then waits for UART0 before it receives again; leave it off if nothing is connected.
 - **TCP** (port `2323` over WiFi, optionally over W5500 LAN on future hardware)
 
 Each sink gets its own input buffer; commands on USB and TCP do not collide. Answers to received commands go back exactly to the sink that sent the command. Spontaneous receive frames (`F…`/`A…`/`Z…`/…) go to all currently connected transports.
@@ -222,7 +222,7 @@ Deletes **all** WiFi credentials from the NVS namespace `culfw32_wifi` and ends 
 
 The server listens on `0.0.0.0:2323` (a-culfw-compliant, `EE_IP4_TCPLINK_PORT`). As soon as WiFi is `connected` (or the AP fallback is active), the server accepts connections. The listener also waits in the `disconnected` state and is available immediately once the connection is up.
 
-Each connection gets its own LineBuf (max. 16 concurrent transports incl. USB+UART). TCP_NODELAY is set — small culfw answers go out without Nagle delay.
+Each connection gets its own LineBuf (max. 16 concurrent transports incl. USB and, if switched on, UART0). TCP_NODELAY is set — small culfw answers go out without Nagle delay.
 
 ### Connecting with `nc` (netcat)
 
@@ -302,7 +302,7 @@ Both interfaces active. Useful for lab/bring-up, less so for production (an open
 
 ### Mode 0 — off
 
-No radio traffic. CULFW32 remains reachable via USB/UART. Saves power.
+No radio traffic. CULFW32 remains reachable via USB (and UART0 if switched on). Saves power.
 
 ---
 
@@ -329,7 +329,7 @@ No radio traffic. CULFW32 remains reachable via USB/UART. Saves power.
 ### Known limits
 
 - **TLS**: none — port 2323 is plain text, a-culfw-compliant. Usually OK in the LAN; better not exposed directly to the Internet.
-- **Concurrent TCP clients**: max. 16 transports in total (USB + UART + n × TCP). A typical setup has 1–2 TCP clients (FHEM + lab console) and is comfortably below the limit.
+- **Concurrent TCP clients**: max. 16 transports in total (USB, UART0 if switched on, n × TCP). A typical setup has 1–2 TCP clients (FHEM + lab console) and is comfortably below the limit.
 - **Authentication on the TCP port**: none — but the **IP allowlist via `EWA`** at least restricts *which* IPs may connect at all. In the LAN, this is in practice sufficient for most home environments.
 
 ---
@@ -365,4 +365,4 @@ From this point on, the device is reachable at:
 - `192.168.1.42:2323` (static, provided the DHCP lease is long enough)
 - `culfw32-basement.local:2323` (mDNS, robust against IP changes)
 
-USB can be unplugged — TCP+UART keep running independently.
+USB can be unplugged — TCP (and UART0 if switched on) keep running independently.

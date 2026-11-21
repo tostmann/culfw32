@@ -172,7 +172,7 @@ On the CULFW32 ASCII console:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `hmu.port`     | U16, persist | 2325 | Legacy port (HM-MOD-RPI-PCB / FHEM). The Dual port is always `hmu.port + 2`. |
-| `hmu.module`   | U8, persist  | 0    | **Default mode for statically bound transports** (USB-CDC, UART). 0=Legacy, 1=Dual. Over TCP/UDP the mode is determined per slot stamp — so **do not change** this key for a TCP/UDP connection. |
+| `hmu.module`   | U8, persist  | 0    | **Default mode for statically bound transports** (USB-CDC, and UART0 if switched on). 0=Legacy, 1=Dual. Over TCP/UDP the mode is determined per slot stamp — so **do not change** this key for a TCP/UDP connection. |
 | `hmu.hmid`     | Str, ro      | -    | active 3-byte HMID (set by rfd via APP_SET_HMID) |
 | `?build`       | Str, ro      | -    | contains `fe:hmuartlgw` if the frontend is compiled in |
 | `?stats`       | Tabular      | -    | RX/TX counters per protocol, heap, in future also uptime + reset counters |

@@ -100,7 +100,13 @@ constexpr uint8_t  RF_FREQOFF_MAGIC  = 0x5A;
 // installieren, sonst (0, 0xFF unbeschrieben) nur pruefen und melden.
 constexpr uint16_t OTA_AUTO          = 0x15B;  // 1 byte
 
-// CULFW32-Erweiterungen reichen bis 0x15B; der Rest bis 0x3FF ist frei.
+// culfw-Schnittstelle auf UART0 (USB-C SBU1/SBU2, FFC J1): 1 = beim Start
+// einrichten, sonst (0, 0xFF unbeschrieben) aus. Bis 0.2.20 lief sie immer;
+// sie schreibt blockierend mit 38400 Baud, und der Empfangstask wartete
+// darin (wM-Bus, 21.11.2026: Empfang auf die UART-Rate begrenzt).
+constexpr uint16_t UART_ENABLE       = 0x15C;  // 1 byte
+
+// CULFW32-Erweiterungen reichen bis 0x15C; der Rest bis 0x3FF ist frei.
 
 // Default-Wert fuer uninitialisierte EE-Bytes (wie nach Power-On AVR-EEPROM).
 constexpr uint8_t  DEFAULT         = 0xFF;
