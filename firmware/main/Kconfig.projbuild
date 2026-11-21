@@ -49,14 +49,16 @@ menu "CULFW32 — Modul-Auswahl"
               (868,4998 MHz, 100 kBaud GFSK).  Befehle D / Dr / Dx / Dl.
 
         config CULFW32_BUILD_RF_WMBUS
-            bool "wMBus: T1 / S1 (b-Befehl)"
+            bool "wMBus: S1 / T1 / C1 (b-Befehl)"
             default y
             help
-                Aktiviert die wireless-MBus-RF-Klasse (T1 100 kbaud /
-                S1 32.7 kbaud). 3-out-of-6-Codec, Manchester-Codec,
-                CRC-16/EN13757 (poly 0x3D65). RX + TX byte-genau a-culfw
-                rf_mbus.c. AES-Decoder folgt mit HMUARTLGW-Phase-4
-                (mbedtls + Per-Device-Key in NVS). ~15 KB Code.
+                Aktiviert die Wireless-M-Bus-Klasse: Empfang S1 (32,768
+                kchip/s, Manchester), T1 (100 kchip/s, 3 aus 6) und C1 (nur
+                Empfang, zusammen mit T1); Senden S1/T1. Codec nach
+                EN 13757-4, CRC-16/EN 13757 (Polynom 0x3D65); Herkunft der
+                Registerwerte in wmbus_cfg.cpp. Ausgabe wie
+                culfw (`b...`, `bY...`); entschluesselt wird nichts, das macht
+                die Host-Software. ~15 KB Code.
 
         config CULFW32_BUILD_RF_HMIP
             bool "HmIP raw RX (PHY-only Sniffer, P-Befehl)"

@@ -13,11 +13,11 @@ CULFW32 receives Wireless M-Bus telegrams (EN 13757-4) from meters in modes S1, 
 | `brc` | receive modes C1 and T1 at the same time (868.95 MHz) | `CMODE` |
 | `br` + any other letter, e.g. `brx` | receiver off | `OFF` |
 | `b` | show the current mode | `SMODE`, `TMODE`, `CMODE` or `OFF` |
-| `bss<hex>`, `bst<hex>` | send one frame in mode S or T, then go on receiving as before | current mode |
+| `bss<hex>`, `bst<hex>` | send one frame in mode S or T; if wM-Bus was receiving, reception goes on as before | current mode |
 
 `bss` and `bst` take one frame in frame format A, starting with the L-field and including its CRC bytes. A command line holds 128 characters, so frames of up to 62 bytes (L-field up to 53) can be sent this way. CULFW32 does not transmit in mode C.
 
-While wM-Bus reception is on, the radio receives no other protocol, as in culfw. `X21` then only sets the report flags and does not switch the radio back to SlowRF.
+While wM-Bus reception is on, the radio receives no other protocol, as in culfw. `X21` then only sets the report flags and does not switch the radio back to SlowRF. `bss` and `bst` switch the radio to wM-Bus as well: if another protocol was receiving, it stops, and after the frame the radio stays idle (`b` answers `OFF`).
 
 ---
 
@@ -28,8 +28,21 @@ b<frame><LQI><RSSI>      modes S1 and T1, and C1 in frame format A
 bY<frame><LQI><RSSI>     mode C1 in frame format B
 ```
 
-- `<frame>` holds every byte from the L-field to the last CRC byte, two hex digits each. Frames with a CRC error are not printed; `?stats` counts them in the `wmbus` line (`rx <ok>/<errors>`).
+- `<frame>` holds every byte from the L-field to the last CRC byte, two hex digits each. Frames with a CRC error are not printed; `?stats` counts them in the `wmbus` line (`rx <ok>/<errors>`). Frames shorter than a full first block (L-field below 9) are not printed either.
 - `<LQI>` and `<RSSI>` are the two status bytes the CC1101 appends to a received packet (data sheet SWRS061I). The RSSI in dBm is roughly the RSSI byte as a signed number, divided by two, minus 74.
+
+Counters in the registry (`?stats.wmbus.rx_msgs` and so on; the web UI lists them in the Config tab under *stats*):
+
+| Key | Counts |
+|---|---|
+| `stats.wmbus.rx_msgs` | frames printed |
+| `stats.wmbus.crc_err` | frames with a CRC error |
+| `stats.wmbus.rx_err` | `crc_err` plus frames lost because the receive FIFO overflowed |
+| `stats.wmbus.rx_overflow` | receive FIFO overflows: the stick came too late to read the radio, for example while writing its flash; a frame cut off by it is discarded and counted in `rx_err`, a frame that was already complete is still printed (its LQI and RSSI bytes are then not measured values) |
+| `stats.wmbus.sync_rejects` | sync words not followed by a valid frame start, mostly noise; not part of `rx_err` |
+| `stats.wmbus.tx_msgs`, `tx_err`, `tx_airtime` | frames sent with `bss`/`bst`, failed sends, airtime in 10 ms units |
+
+`?stats` adds `ovf <n>  sync_rej <n>` to the `wmbus` line once either counter is above 0.
 
 Frame format A carries a CRC after the first 10 bytes and after every further 16 bytes. In frame format B the L-field counts all following bytes including the CRCs; frames of up to 128 bytes have one CRC at the end, longer ones a CRC over bytes 0 to 125 and a second one at the end.
 
@@ -43,7 +56,7 @@ The tab *wM-Bus* of the web UI (`http://<stick-ip>`) starts reception with butto
 - Stop switches the receiver off and leaves the radio idle; it does not return to the protocol used before. Switch back from the host software, with `X21`, `Ar` or `Zr` in the Terminal tab, or by restarting the stick. The reception mode does not survive a restart either.
 - Stop sends `brx` only after the stick has answered that wM-Bus is receiving, because `br` + any other letter first switches the radio to wM-Bus.
 - In mode `brc` a `b…` line can be T1 or C1 in frame format A; the tab shows `T1 / C1 (A)`. Only `bY…` is certain (C1, frame format B).
-- The error counter also counts noise that began like a telegram.
+- The error counter (CRC errors) also counts noise that began like a telegram with a valid length.
 - In security modes 5 and 7 the tab shows how many 16-byte blocks are encrypted; with 0 blocks the telegram is plain text.
 
 ![wM-Bus tab (meter IDs hidden)](img/webui-wmbus.png)

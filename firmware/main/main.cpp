@@ -33,6 +33,8 @@
 #endif
 #ifdef CONFIG_CULFW32_BUILD_RF_WMBUS
 #include "wmbus_rf.hpp"
+#endif
+#ifdef CONFIG_CULFW32_BUILD_RF_HMIP
 #include "hmip_rf.hpp"
 #endif
 #ifdef CONFIG_CULFW32_BUILD_TRANSPORT_UART
@@ -930,6 +932,8 @@ void setup_config_registry(ConfigRegistry& cfg) {
 #endif
 #ifdef CONFIG_CULFW32_BUILD_RF_WMBUS
             add("rf:wmbus");
+#endif
+#ifdef CONFIG_CULFW32_BUILD_RF_HMIP
             add("rf:hmip");
 #endif
             add("tx:usbcdc");
@@ -1251,6 +1255,18 @@ void setup_config_registry(ConfigRegistry& cfg) {
         });
     }
 
+#ifdef CONFIG_CULFW32_BUILD_RF_WMBUS
+    // wM-Bus-Empfang: Zaehler, die nicht in rx_err stecken.
+    reg_stats_u32("stats.wmbus.rx_overflow",
+                  [] { return RfStats::instance().snapshot(ProtocolId::Mbus).rx_overflow; },
+                  "wmbus receive FIFO overflows (the receive task came too late); "
+                  "an incomplete frame is discarded and also counted in rx_err");
+    reg_stats_u32("stats.wmbus.sync_rejects",
+                  [] { return RfStats::instance().snapshot(ProtocolId::Mbus).sync_rejects; },
+                  "wmbus sync words not followed by a valid frame start (mostly noise; "
+                  "not in rx_err)");
+#endif
+
     // AskSin-spezifische Diagnostik: letzter on-air TX-Header. Beantwortet
     // "ist APP_SET_HMID wirklich aktiv?" ohne RF-Sniffer.
     cfg.register_entry({
@@ -1466,6 +1482,8 @@ extern "C" void app_main(void) {
 #endif
 #ifdef CONFIG_CULFW32_BUILD_RF_WMBUS
     g_mgr->register_protocol(std::make_shared<WmbusRF>());
+#endif
+#ifdef CONFIG_CULFW32_BUILD_RF_HMIP
     // rf_hmip — HmIP-PHY, reiner Sniffer: Empfang und roher Hex-Dump.
     // Kein TX, kein MAC-Layer, keine Krypto — dafuer ist q-culfw zustaendig.
     g_mgr->register_protocol(std::make_shared<HmipRF>());

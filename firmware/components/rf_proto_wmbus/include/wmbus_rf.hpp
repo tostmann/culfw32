@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Dirk Tostmann
 //
-// wMBus T1/S1 (Receive + Transmit) und C1 (nur Receive, zusammen mit T1) auf
-// CC1101. Vendor-Pattern aus a-culfw culfw/clib/rf_mbus.c. RX-State-Machine
-// (RXinfo state 0..3) + TX-FIFO-Refill-Loop, 1:1 portiert auf FreeRTOS.
+// wMBus S1/T1 (Empfang + Senden) und C1 (nur Empfang, zusammen mit T1) auf
+// CC1101. RX-Zustandsmaschine (RXinfo, Zustaende 0..3) und TX-FIFO-Nachfuellen
+// nach dem Aufbau von a-culfw culfw/clib/rf_mbus.c, auf FreeRTOS umgesetzt
+// und seither erweitert (Abweichungen im Kopf von wmbus_rf.cpp).
 
 #pragma once
 
@@ -75,8 +76,9 @@ private:
     RxCallback    rx_cb_;
     void*         task_handle_   = nullptr;
     // esp_timer (µs-Aufloesung, unabhaengig von CONFIG_FREERTOS_HZ) — gibt dem
-    // rx-Task seine 2-ms-Kadenz. Laeuft nur, solange wMBus die aktive Klasse
-    // ist (start()/stop()). Begruendung im Kommentar an rx_task_loop().
+    // rx-Task seine Kadenz kTickUs. start() startet ihn, set_mode_* startet
+    // ihn wieder; set_off(), stop() und Senden aus dem Leerlauf halten ihn an.
+    // Begruendung im Kommentar an rx_task_loop().
     void*         tick_timer_    = nullptr;
     uint8_t       mbus_mode_     = 0;        // 0=NONE, 1=S, 2=T, 3=C
     RadioMode     radio_mode_    = RadioMode::None;

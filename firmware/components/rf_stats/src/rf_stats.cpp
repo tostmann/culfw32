@@ -152,6 +152,18 @@ void RfStats::on_crc_error(ProtocolId p) {
     slots_[i].crc_err.fetch_add(1, std::memory_order_relaxed);
 }
 
+void RfStats::on_rx_overflow(ProtocolId p) {
+    int i = proto_idx(p);
+    if (i < 0) return;
+    slots_[i].rx_overflow.fetch_add(1, std::memory_order_relaxed);
+}
+
+void RfStats::on_sync_reject(ProtocolId p) {
+    int i = proto_idx(p);
+    if (i < 0) return;
+    slots_[i].sync_rejects.fetch_add(1, std::memory_order_relaxed);
+}
+
 RfStats::Snapshot RfStats::snapshot(ProtocolId p) const {
     Snapshot snap = {};
     int i = proto_idx(p);
@@ -165,6 +177,8 @@ RfStats::Snapshot RfStats::snapshot(ProtocolId p) const {
     snap.rx_err            = s.rx_err.load(std::memory_order_relaxed);
     snap.tx_err            = s.tx_err.load(std::memory_order_relaxed);
     snap.crc_err           = s.crc_err.load(std::memory_order_relaxed);
+    snap.rx_overflow       = s.rx_overflow.load(std::memory_order_relaxed);
+    snap.sync_rejects      = s.sync_rejects.load(std::memory_order_relaxed);
     snap.last_rssi_dbm     = s.last_rssi_dbm.load(std::memory_order_relaxed);
     snap.last_rx_uptime_ms = s.last_rx_us.load(std::memory_order_relaxed);
     return snap;
@@ -207,7 +221,8 @@ size_t RfStats::format_text(char* out, size_t out_size) const {
     };
     for (ProtocolId p : kAll) {
         auto s = snapshot(p);
-        if (s.rx_msgs == 0 && s.tx_msgs == 0 && s.rx_err == 0 && s.tx_err == 0) continue;
+        if (s.rx_msgs == 0 && s.tx_msgs == 0 && s.rx_err == 0 && s.tx_err == 0 &&
+            s.rx_overflow == 0 && s.sync_rejects == 0) continue;
         int rc = snprintf(out + n, out_size - n,
             "%-7s rx %lu/%lu (%lu B)  tx %lu/%lu (%lu B,%lu*10ms)  rssi %ld  ago %lus\r\n",
             proto_name(p),
@@ -219,6 +234,15 @@ size_t RfStats::format_text(char* out, size_t out_size) const {
         if (rc < 0) break;
         n += rc;
         if ((size_t)n >= out_size) { out[out_size - 1] = 0; return out_size - 1; }
+        // Nur wo eine Klasse sie zaehlt (bisher wM-Bus): an die Zeile haengen.
+        if (s.rx_overflow || s.sync_rejects) {
+            n -= 2;   // vor das CRLF
+            rc = snprintf(out + n, out_size - n, "  ovf %lu  sync_rej %lu\r\n",
+                          (unsigned long)s.rx_overflow, (unsigned long)s.sync_rejects);
+            if (rc < 0) break;
+            n += rc;
+            if ((size_t)n >= out_size) { out[out_size - 1] = 0; return out_size - 1; }
+        }
     }
     return (size_t)n;
 }

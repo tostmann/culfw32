@@ -2502,6 +2502,10 @@ void handle_b(std::span<const char> args, Transport* src, uint8_t slot_id, RfMan
         }
         if (mgr->tx(ProtocolId::Mbus, &tx, sizeof(tx)) != ESP_OK) {
             // a-culfw schreibt im Fehler-Pfad nichts; nur Status. Wir spiegeln.
+            // Kam das Senden gar nicht bis tx_send_packet (Slot belegt, Klasse
+            // gewechselt), laeuft nach einer Aktivierung aus dem Leerlauf
+            // sonst der 500-us-Takt ohne Empfang weiter.
+            if (!w->rx_active()) w->set_off();
         }
         status_line(w);
         return;

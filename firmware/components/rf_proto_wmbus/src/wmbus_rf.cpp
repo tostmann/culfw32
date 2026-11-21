@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 Dirk Tostmann
 //
-// wMBus T1/S1 RF-Klasse — Vendor-Port a-culfw culfw/clib/rf_mbus.c (D.Tostmann).
-// Empfang im Modus C (C1 samt T1, `brc`) eigenstaendig nach TI SWRA522E.
+// wMBus S1/T1 RF-Klasse.  Empfangs-Zustandsmaschine und Sendeschleife folgen
+// dem Aufbau von a-culfw culfw/clib/rf_mbus.c (D.Tostmann) und weichen seither
+// ab: Rest-Lesen am Paketende, Verwerfen nach RX-FIFO-Ueberlauf, Nachfuellen
+// des TX-FIFO bei GDO0 low, Neuaufsetzen im RX-Task, Zaehler.  Empfang im
+// Modus C (C1 samt T1, `brc`) eigenstaendig nach TI SWRA522E.
 
 #include "wmbus_rf.hpp"
 #include "wmbus_cfg.hpp"
@@ -34,6 +37,7 @@ constexpr uint8_t REG_MCSM1   = 0x17;
 constexpr uint8_t REG_IOCFG2  = 0x00;
 constexpr uint8_t REG_IOCFG0  = 0x02;
 constexpr uint8_t REG_MARC    = 0x35;
+constexpr uint8_t REG_RXBYTES = 0x3B;   // Statusregister, nur per read_status
 
 constexpr uint8_t CC_RXFIFO   = 0x3F;
 constexpr uint8_t CC_TXFIFO   = 0x3F;
@@ -49,7 +53,28 @@ constexpr uint8_t SNOP  = 0x3D;
 
 constexpr uint8_t MARCSTATE_IDLE = 0x01;
 constexpr uint8_t MARCSTATE_RX   = 0x0D;
+constexpr uint8_t MARCSTATE_RXFIFO_OVERFLOW = 0x11;
+constexpr uint8_t MARCSTATE_TXFIFO_UNDERFLOW = 0x16;
 constexpr uint8_t CC_STATUS_TX_UNDERFLOW = 0x70;  // (status>>4)&0x07 == 0x07 = TX_UNDERFLOW
+
+// Kleinstes L-Feld: C, M und A fuellen den ersten Block (EN 13757-4).  Format
+// B im Modus C braucht dazu CI und CRC (L >= 12 wie culfw aus dem SVN).
+constexpr uint8_t kMinLField  = 9;
+constexpr uint8_t kMinLFieldB = 12;
+
+// Am Paketende halten RX-FIFO (64 Byte) und Vorlesepuffer (1 Byte) hoechstens
+// 65 Byte: 63 Datenbytes und die beiden Statusbytes RSSI/LQI.  Ein Byte mehr,
+// und der Chip geht in RXFIFO_OVERFLOW (Errata SWRZ020E S. 8-9, Fall
+// APPEND_STATUS = 1, CRC_EN = 0, FEC_EN = 0).
+constexpr uint16_t kMaxTailBytes = 63;
+
+// Sendezeit in 10-ms-Einheiten fuer ?stats: Praeambel 4 + Sync 2 Byte vor den
+// On-Air-Bytes, 8 Chips je Byte; T 99,98 kBd (80 us), S 32,73 kBd (245 us).
+// Aufgerundet: ein gesendeter Rahmen zaehlt mindestens eine Einheit.
+uint16_t tx_airtime_10ms(uint16_t on_air_bytes, bool s_mode) {
+    const uint32_t us = (static_cast<uint32_t>(on_air_bytes) + 6u) * (s_mode ? 245u : 80u);
+    return static_cast<uint16_t>((us + 9999u) / 10000u);
+}
 
 uint8_t marc_state(CC1101Driver& d) {
     uint8_t v = 0xFF;
@@ -187,7 +212,14 @@ bool WmbusRF::enter_rx(bool force) {
     // Luft fuer den IDLE-Task. 5 x 1 Tick = 5 x 10 ms trifft das dokumentierte
     // Budget. ets_delay_us-Busy-Wait wuerde idle starven.
     for (uint16_t i = 0; i < 5; i++) {
-        if (marc_state(*drv_) == MARCSTATE_IDLE) break;
+        const uint8_t ms = marc_state(*drv_);
+        if (ms == MARCSTATE_IDLE) break;
+        // Aus RXFIFO_OVERFLOW fuehrt laut Datenblatt nur SFRX nach IDLE
+        // (SWRS061I S. 31, Bild 25 S. 50); ob SIDLE dort wirkt, sagt es nicht.
+        if (ms == MARCSTATE_RXFIFO_OVERFLOW) {
+            drv_->strobe(SFRX);
+            continue;
+        }
         vTaskDelay(1);
     }
     drv_->strobe(SFTX);
@@ -258,7 +290,13 @@ void WmbusRF::rx_step() {
                     // geteilten SPI-Bus nicht in jedem Takt mit MARCSTATE-
                     // Abfragen zu belegen.
                     idle_check_ = 0;
-                    if (marc_state(*drv_) != MARCSTATE_RX) {
+                    const uint8_t ms = marc_state(*drv_);
+                    if (ms != MARCSTATE_RX) {
+                        // Ueberlauf hier: der Task kam nach einem Sync > 5 ms
+                        // nicht dran; was das war, ist nicht mehr zu sehen.
+                        if (ms == MARCSTATE_RXFIFO_OVERFLOW) {
+                            RfStats::instance().on_rx_overflow(ProtocolId::Mbus);
+                        }
                         enter_rx(true);
                         return;
                     }
@@ -287,12 +325,26 @@ void WmbusRF::rx_step() {
             }
             if (drv_->gdo0_level()) {
                 if (drv_->read_burst(CC_RXFIFO, {rxi_.p_byte, 3}) != ESP_OK) {
+                    RfStats::instance().on_rx_error(ProtocolId::Mbus);
                     rxi_.state = 0;
                     return;
                 }
+                // Kein Rahmenanfang (meist Rauschen nach einem Fehlsync):
+                // zaehlen, nicht als Rahmenfehler, und neu aufsetzen.
+                auto reject_start = [this] {
+                    RfStats::instance().on_sync_reject(ProtocolId::Mbus);
+                    // Kam der Takt so spaet, dass der FIFO schon uebergelaufen
+                    // ist, zaehlt das auch hier (die Paketende-Pruefung unten
+                    // wird nicht mehr erreicht).
+                    if (!drv_->gdo2_level() &&
+                        marc_state(*drv_) == MARCSTATE_RXFIFO_OVERFLOW) {
+                        RfStats::instance().on_rx_overflow(ProtocolId::Mbus);
+                    }
+                    rxi_.state = 0;
+                };
                 if (rxi_.format == 0 && mbus_mode_ == wmbus::MODE_S) {
                     if (wmbus::manch_decode(rxi_.p_byte, bytes_decoded) != wmbus::MAN_DECODING_OK) {
-                        rxi_.state = 0;
+                        reject_start();
                         return;
                     }
                     rxi_.l_field = bytes_decoded[0];
@@ -301,45 +353,48 @@ void WmbusRF::rx_step() {
                            rxi_.p_byte[0] == wmbus::C_SIGNAL_BYTE) {
                     // Modus C: Signalbyte, Kennbyte des Rahmenformats, L-Feld;
                     // der Rahmen folgt ohne Kodierung.  rxi_.length zaehlt ab
-                    // dem Signalbyte.  Mindestlaengen: Format A ein voller
-                    // erster Block (C, M, A), Format B dazu CI und CRC
-                    // (L >= 12 wie culfw aus dem SVN).
+                    // dem Signalbyte.  Mindestlaengen: kMinLField, kMinLFieldB.
                     rxi_.l_field = rxi_.p_byte[2];
-                    if (rxi_.p_byte[1] == wmbus::C_FRAME_A && rxi_.l_field >= 9) {
+                    if (rxi_.p_byte[1] == wmbus::C_FRAME_A && rxi_.l_field >= kMinLField) {
                         rxi_.c_frame = 'A';
                         rxi_.length  = static_cast<uint16_t>(2 + wmbus::packet_size(rxi_.l_field));
-                    } else if (rxi_.p_byte[1] == wmbus::C_FRAME_B && rxi_.l_field >= 12) {
+                    } else if (rxi_.p_byte[1] == wmbus::C_FRAME_B && rxi_.l_field >= kMinLFieldB) {
                         rxi_.c_frame = 'B';
                         rxi_.length  = static_cast<uint16_t>(2 + wmbus::packet_size_b(rxi_.l_field));
                     } else {
-                        rxi_.state = 0;
+                        reject_start();
                         return;
                     }
                 } else {
                     if (wmbus::decode_3outof6(rxi_.p_byte, bytes_decoded, 0)
                             != wmbus::DECODING_3OUTOF6_OK) {
-                        rxi_.state = 0;
+                        reject_start();
                         return;
                     }
                     rxi_.l_field = bytes_decoded[0];
                     rxi_.length  = wmbus::byte_size(0, 0, wmbus::packet_size(rxi_.l_field));
                 }
-
-                if (rxi_.length > kEncBufSize || rxi_.length < 4) {
-                    // Defense-in-Depth: length < 4 liesse bytes_left (length - 3)
-                    // unterlaufen; kleinste Laenge ist 5 (Modus T, L = 0).
-                    rxi_.state = 0;
+                // Modus S und T: ohne vollstaendigen ersten Block kein Rahmen
+                // (bis 0.2.19 nahmen sie jedes L ab 0 an, Modus C nicht).
+                if (!rxi_.c_frame && rxi_.l_field < kMinLField) {
+                    reject_start();
                     return;
                 }
 
-                // Der Tick laeuft mit Prio 1 und wird von jedem Frontend-Task
-                // (5/6) verdraengt.  Ohne diese Wiederholung des Gates schreibt
-                // ein verdraengter rx_step nach einem Mode-Wechsel PKTLEN und
-                // PKTCTRL0 in die frisch geladene Konfiguration der NACHFOLGE-
-                // klasse -- die empfaengt dann nichts mehr, und niemand merkt
-                // es.  Fruehes Return ist gefahrlos: stop() setzt mbus_mode_
-                // und radio_mode_ selbst zurueck, halbe Zustaende ueberleben
-                // also nicht.
+                if (rxi_.length > kEncBufSize || rxi_.length < 4) {
+                    // Defense-in-Depth: length < 4 liesse bytes_left (length - 3)
+                    // unterlaufen; mit L >= 9 ist die kleinste Laenge 14 (Modus C,
+                    // Format A: Signal- und Kennbyte + packet_size(9)).
+                    reject_start();
+                    return;
+                }
+
+                // Nur noch Absicherung: rx_step laeuft unter op_mtx_, und
+                // stop() wartet auf diese Sperre, enabled_ kann sich also
+                // waehrend eines Takts nicht aendern.  Ohne Sperre (bis 0.1.870)
+                // konnte ein verdraengter rx_step nach einem Klassenwechsel
+                // PKTLEN und PKTCTRL0 in die Konfiguration der NACHFOLGEklasse
+                // schreiben.
                 if (!enabled_) return;
                 if (rxi_.length < wmbus::MAX_FIXED_LENGTH) {
                     drv_->write_reg(REG_PKTLEN, static_cast<uint8_t>(rxi_.length));
@@ -385,12 +440,14 @@ void WmbusRF::rx_step() {
                 // read_burst Heap-Memory zerstoeren.
                 if (rxi_.p_byte < enc_buf_ ||
                     rxi_.p_byte + chunk > enc_buf_ + kEncBufSize) {
+                    RfStats::instance().on_rx_error(ProtocolId::Mbus);
                     rxi_.state = 0;
                     return;
                 }
                 // chunk == 0: alles gelesen, der Chip hat mehr als erwartet --
                 // nichts holen, das Paketende (GDO2 low) raeumt unten auf.
                 if (chunk > 0 && drv_->read_burst(CC_RXFIFO, {rxi_.p_byte, chunk}) != ESP_OK) {
+                    RfStats::instance().on_rx_error(ProtocolId::Mbus);
                     rxi_.state = 0;
                     return;
                 }
@@ -401,14 +458,49 @@ void WmbusRF::rx_step() {
     }
 
     // End-of-Packet: GDO2 LOW + state>1 -> Rest-FIFO leeren + dekodieren.
+    // GDO2 (IOCFG2 = 0x06) faellt am Paketende, aber auch, wenn der Chip in
+    // RXFIFO_OVERFLOW geht (SWRS061I Tabelle 41, S. 62): dann kam der Task zu
+    // spaet (bei 100 kchip/s ist der leere FIFO nach 5,2 ms voll), etwa beim
+    // Loeschen eines Flash-Sektors.  Bis 0.2.19 wurde beides gleich behandelt:
+    // read_burst lehnte den Rest (> 64 Byte) ab, und dekodiert wurde enc_buf_
+    // samt dem Rest des VORIGEN Rahmens -- der alte Rahmen kam mit gueltigen
+    // CRCs erneut heraus, oder ein Mischrahmen.
     if (!drv_->gdo2_level() && rxi_.state > 1) {
-        if (rxi_.bytes_left > 0 || rxi_.state == 3) {
+        // Mehr als kMaxTailBytes kann der Chip am Paketende nicht halten.
+        bool complete = (rxi_.state == 3 && rxi_.bytes_left <= kMaxTailBytes);
+        if (marc_state(*drv_) == MARCSTATE_RXFIFO_OVERFLOW) {
+            RfStats::instance().on_rx_overflow(ProtocolId::Mbus);
+            // Nach dem Ueberlauf kommt nichts mehr hinzu, RXBYTES steht still.
+            // Vollstaendig ist der Rahmen nur, wenn sein Rest noch im FIFO
+            // liegt (Ueberlauf erst nach dem Rahmen: PKTLEN zu spaet, der Chip
+            // empfing weiter).  Sonst fehlt ein Stueck -- auch dann, wenn case 3
+            // eben noch ein Stueck aus dem vollen FIFO geholt hat.
+            uint8_t rxbytes = 0;
+            if (complete && (drv_->read_status(REG_RXBYTES, rxbytes) != ESP_OK ||
+                             (rxbytes & 0x7F) < rxi_.bytes_left)) {
+                complete = false;
+            }
+        }
+        if (!complete) {
+            // Verwerfen.  Im Zustand 2 war noch kein L-Feld gelesen, das
+            // zaehlt nicht als Rahmen.  Der naechste Takt setzt neu auf.
+            if (rxi_.state == 3) RfStats::instance().on_rx_error(ProtocolId::Mbus);
+            rxi_.state = 0;
+            return;
+        }
+        {
             uint8_t rssi = 0, lqi = 0;
-            uint8_t left = static_cast<uint8_t>(rxi_.bytes_left);
-            if (left > 0) {
-                drv_->read_burst(CC_RXFIFO, {rxi_.p_byte, left});
+            const uint8_t left = static_cast<uint8_t>(rxi_.bytes_left);
+            if (left > 0 && drv_->read_burst(CC_RXFIFO, {rxi_.p_byte, left}) != ESP_OK) {
+                RfStats::instance().on_rx_error(ProtocolId::Mbus);
+                rxi_.state = 0;
+                return;
             }
             // Append-Status (PKTCTRL1.bit2=1) liefert RSSI + LQI nach den Daten.
+            // Lief der FIFO erst nach dem Rahmen ueber (PKTLEN zu spaet, der
+            // Chip empfing weiter), sind die Daten vollstaendig, die beiden
+            // Bytes aber keine Statusbytes; der Rahmen geht trotzdem hinaus
+            // (wie bis 0.2.19), docs/WmbusHowTo.md sagt es.
             drv_->read_reg(CC_RXFIFO, rssi);
             drv_->read_reg(CC_RXFIFO, lqi);
 
@@ -477,7 +569,8 @@ void WmbusRF::rx_task_loop() {
     // (gemessen 01.09.2026; der Zustand ueberlebte auch das Verlassen des
     // wMBus-Modus, weil der `continue`-Pfad genauso spinnt).
     // `vTaskDelay(1)` waere die falsche Antwort: 10 ms Poll-Abstand laesst bei
-    // T-Mode 100 kbaud die 64-Byte-FIFO ueberlaufen (Threshold 32 B = 320 µs).
+    // T-Mode 100 kbaud die 64-Byte-FIFO ueberlaufen (ab der 32-Byte-Schwelle
+    // bleiben 2,6 ms, aus dem leeren FIFO 5,2 ms).
     // Der Timeout unten ist nur ein Sicherheitsnetz fuer den Fall, dass der
     // Timer nicht laeuft (wMBus nicht aktiv) — dann blockiert der Task sauber
     // statt zu pollen.
@@ -562,9 +655,9 @@ esp_err_t WmbusRF::start(uint8_t slot_id, CC1101Driver& drv) {
 
 esp_err_t WmbusRF::stop() {
     OpLock lk(op_mtx_);   // ein laufender rx_step endet vorher
-    // Takt zuerst anhalten: der rx-Task soll nicht noch auf einen Chip zugreifen,
-    // dessen drv_ gleich nullptr wird. Der Task selbst bleibt (Eternal-Task) und
-    // blockiert danach im Notify-Timeout.
+    // Takt zuerst anhalten: der rx-Task soll den stillgelegten Chip nicht mehr
+    // anfassen; enabled_ = false unten sperrt ihn ganz. Der Task selbst bleibt
+    // (Eternal-Task) und blockiert danach im Notify-Timeout.
     if (tick_timer_) {
         esp_timer_stop(static_cast<esp_timer_handle_t>(tick_timer_));
     }
@@ -576,7 +669,7 @@ esp_err_t WmbusRF::stop() {
     // also nie ungueltig.  Ihn zu loeschen brachte keine Sicherheit, sondern
     // verwandelte "Task fasst ein stillgelegtes Radio an" in einen Null-Zugriff:
     // der RX-Task laeuft hoeher priorisiert (8) als die Frontend-Tasks (5/6) und
-    // kann in drain_one_frame() blockieren (SPI-Mutex; Renderer ->
+    // kann bei der Ausgabe blockieren (rx_cb_ -> Renderer ->
     // TcpClientTransport::write, seit 0.1.902 ohne Warten am Socket; bis 0.1.893 unbegrenzt).
     // Kehrte er zurueck, waehrend das Frontend zwischen stop() und start() stand,
     // lief ein strobe() auf einen geloeschten Zeiger.  Gegated wird ueber das Flag.
@@ -612,6 +705,10 @@ void WmbusRF::set_mode_cmode() {
 
 void WmbusRF::set_off() {
     OpLock lk(op_mtx_);
+    // `brx` aktiviert wM-Bus vorher (handle_b); hat inzwischen ein anderer
+    // Klient eine andere Klasse geholt, gehoert ihr der Chip -- kein SIDLE
+    // hineinschiessen.  stop() hat Takt und Zustand dann schon abgeraeumt.
+    if (!enabled_) return;
     if (drv_) drv_->strobe(SIDLE);
     mbus_mode_  = 0;
     radio_mode_ = RadioMode::None;
@@ -628,7 +725,26 @@ esp_err_t WmbusRF::tx_send_packet(const uint8_t* pkt, uint16_t pkt_size, uint8_t
     uint8_t  prev_mode = (radio_mode_ == RadioMode::Rx) ? mbus_mode_ : 0;
     uint16_t bytes_left = 0;
 
-    if (auto e = init_radio(mbus_mode, RadioMode::Tx); e != ESP_OK) return e;
+    // Jeder Ausgang: Fehler zaehlen, dann zurueck in den Empfang, wenn vorher
+    // empfangen wurde (a-culfw txSendPacket: lastMode).  Sonst wie set_off():
+    // Chip IDLE, Takt aus -- bis 0.2.19 blieb nach `bss`/`bst` aus dem
+    // Leerlauf die Klasse im Zustand "Senden" stehen, und der 500-us-Takt
+    // lief ohne Empfang weiter, bis eine andere Klasse kam.
+    auto finish = [&](esp_err_t rc) -> esp_err_t {
+        if (rc != ESP_OK) RfStats::instance().on_tx_error(ProtocolId::Mbus);
+        if (prev_mode) {
+            init_radio(prev_mode, RadioMode::Rx);
+            enter_rx(true);
+        } else {
+            drv_->strobe(SIDLE);
+            mbus_mode_  = 0;
+            radio_mode_ = RadioMode::None;
+            if (tick_timer_) esp_timer_stop(static_cast<esp_timer_handle_t>(tick_timer_));
+        }
+        return rc;
+    };
+
+    if (auto e = init_radio(mbus_mode, RadioMode::Tx); e != ESP_OK) return finish(e);
 
     // On-air-Encode in enc_buf_.
     if (mbus_mode == wmbus::MODE_S) {
@@ -638,6 +754,7 @@ esp_err_t WmbusRF::tx_send_packet(const uint8_t* pkt, uint16_t pkt_size, uint8_t
         wmbus::encode_tx_bytes_tmode(enc_buf_, pkt, pkt_size);
         bytes_left = wmbus::byte_size(0, 1, pkt_size);
     }
+    const uint16_t air10 = tx_airtime_10ms(bytes_left, mbus_mode == wmbus::MODE_S);
 
     // TX-State-Check.  Status unter demselben Bus-Lock wie der Strobe holen:
     // last_status() spiegelt die LETZTE Transaktion, und die kann von einem
@@ -646,9 +763,7 @@ esp_err_t WmbusRF::tx_send_packet(const uint8_t* pkt, uint16_t pkt_size, uint8_t
     drv_->strobe(SNOP, st);
     if (((st >> 4) & 0x07) != 0x00 /*IDLE*/) {
         drv_->strobe(SIDLE);
-        if (prev_mode) init_radio(prev_mode, RadioMode::Rx);
-        if (prev_mode) enter_rx(true);
-        return ESP_ERR_INVALID_STATE;
+        return finish(ESP_ERR_INVALID_STATE);
     }
     drv_->strobe(SFTX);
 
@@ -665,17 +780,17 @@ esp_err_t WmbusRF::tx_send_packet(const uint8_t* pkt, uint16_t pkt_size, uint8_t
     }
 
     // Zeitdeckel fuer den ganzen Sendevorgang nach der On-Air-Laenge: T-Mode
-    // 100 kchip/s = 80 us je Byte, S-Mode 32,768 kchip/s Manchester = 488 us
-    // je Byte, je mit Reserve.  Die festen 100 ms bis 0.1.872 reichten fuer
-    // lange S-Mode-Rahmen nicht (560 Byte = 273 ms).
+    // 100 kchip/s = 80 us je On-Air-Byte, S-Mode 32,768 kchip/s = 244 us je
+    // On-Air-Byte (Manchester: zwei je Datenbyte), je mit Reserve.  Die festen
+    // 100 ms bis 0.1.872 reichten fuer lange S-Mode-Rahmen nicht (560 On-Air-
+    // Byte = 137 ms).
     const int64_t tx_budget_us = 20000 + static_cast<int64_t>(bytes_left) *
                                  (mbus_mode == wmbus::MODE_S ? 600 : 120);
 
     // Initial-Fill TX-FIFO + STX.
     uint16_t to_write = imin(wmbus::TX_FIFO_SIZE, bytes_left);
     if (drv_->write_burst(CC_TXFIFO, {p, to_write}) != ESP_OK) {
-        if (prev_mode) { init_radio(prev_mode, RadioMode::Rx); enter_rx(true); }
-        return ESP_ERR_INVALID_STATE;
+        return finish(ESP_ERR_INVALID_STATE);
     }
     p          += to_write;
     bytes_left = static_cast<uint16_t>(bytes_left - to_write);
@@ -700,13 +815,11 @@ esp_err_t WmbusRF::tx_send_packet(const uint8_t* pkt, uint16_t pkt_size, uint8_t
             drv_->strobe(SNOP, st2);
             if (((st2 >> 4) & 0x07) == 0x07 /*TX_UNDERFLOW*/) {
                 drv_->strobe(SFTX);
-                if (prev_mode) { init_radio(prev_mode, RadioMode::Rx); enter_rx(true); }
-                return ESP_ERR_INVALID_STATE;
+                return finish(ESP_ERR_INVALID_STATE);
             }
             uint16_t chunk = imin(wmbus::TX_AVAILABLE_FIFO, bytes_left);
             if (drv_->write_burst(CC_TXFIFO, {p, chunk}) != ESP_OK) {
-                if (prev_mode) { init_radio(prev_mode, RadioMode::Rx); enter_rx(true); }
-                return ESP_ERR_INVALID_STATE;
+                return finish(ESP_ERR_INVALID_STATE);
             }
             p          += chunk;
             bytes_left = static_cast<uint16_t>(bytes_left - chunk);
@@ -718,26 +831,30 @@ esp_err_t WmbusRF::tx_send_packet(const uint8_t* pkt, uint16_t pkt_size, uint8_t
             // FIFO noch ueber der Schwelle: der Chip sendet, warten.
             if (esp_timer_get_time() - t_start > tx_budget_us) {
                 drv_->strobe(SIDLE);
-                if (prev_mode) { init_radio(prev_mode, RadioMode::Rx); enter_rx(true); }
-                return ESP_ERR_TIMEOUT;
+                return finish(ESP_ERR_TIMEOUT);
             }
             ets_delay_us(50);
         }
     }
     // TX-Ende abwarten: der letzte FIFO-Inhalt (<= 64 Byte) braucht im S-Mode
-    // bis ~31 ms, im T-Mode ~5 ms.  Max ~50 ms.
-    for (uint16_t i = 0; i < 1000; i++) {
-        if (marc_state(*drv_) == MARCSTATE_IDLE) break;
-        ets_delay_us(50);
+    // bis ~16 ms, im T-Mode ~5 ms.  Max ~50 ms; steht der Chip dann nicht in
+    // IDLE (etwa TX_UNDERFLOW nach dem letzten Nachfuellen), ist der Rahmen
+    // nicht sauber hinaus -- bis 0.2.19 zaehlte das als gesendet.
+    bool tx_done = false;
+    for (uint16_t i = 0; i < 1000 && !tx_done; i++) {
+        tx_done = (marc_state(*drv_) == MARCSTATE_IDLE);
+        if (!tx_done) ets_delay_us(50);
+    }
+    if (!tx_done) {
+        // Aus TX_UNDERFLOW fuehrt SFTX nach IDLE (SWRS061I Bild 25, S. 50).
+        drv_->strobe(marc_state(*drv_) == MARCSTATE_TXFIFO_UNDERFLOW ? SFTX : SIDLE);
+        return finish(ESP_ERR_TIMEOUT);
     }
 
-    RfStats::instance().on_tx(ProtocolId::Mbus, pkt_size, /*credits*/0);
-
-    if (prev_mode) {
-        init_radio(prev_mode, RadioMode::Rx);
-        enter_rx(true);
-    }
-    return ESP_OK;
+    // Sendezeit nur fuer ?stats (stats.rf.tx_airtime); den TX-Kredit belastet
+    // wM-Bus wie in a-culfw nicht.
+    RfStats::instance().on_tx(ProtocolId::Mbus, pkt_size, air10);
+    return finish(ESP_OK);
 }
 
 esp_err_t WmbusRF::tx(const void* typed_payload, size_t payload_size) {

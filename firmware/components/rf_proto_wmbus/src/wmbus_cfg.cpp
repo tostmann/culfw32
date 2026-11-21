@@ -16,7 +16,10 @@
 // Empfang, FREND1, FOCCFG, BSCFG, AGCCTRL, FSCAL, TEST) sind keine
 // Normgroessen; das Datenblatt verweist fuer sie auf SmartRF Studio. Es sind
 // die Werte, die a-culfw fuer den CC1101 nutzt (Herkunft Texas Instruments);
-// mit ihnen ist CULFW32 am 08.10.2026 on-air gegen a-culfw gemessen.
+// mit ihnen ist CULFW32 am 08.10.2026 on-air gegen a-culfw gemessen.  Zwei
+// Werte hat schon a-culfw gegenueber TI geaendert und dort so vermerkt:
+// MDMCFG2 0x06 statt 0x05 (Sync 16/16 statt 15/16, je mit Carrier Sense) und
+// PKTCTRL1 0x04 statt 0x00 (RSSI/LQI anhaengen).
 //
 // FSTEST bleibt auf dem Reset-Wert (Datenblatt: "For test only. Do not write
 // to this register.").
@@ -127,7 +130,8 @@ const uint8_t WMBUS_T_CFG[] = {
     MDMCFG4,  0x5C,   // Kanalfilter 325 kHz (E=1, M=1) -- Abstimmwert; DRATE_E = 12
     MDMCFG3,  0x04,   // DRATE_M = 4: 103,15 kBd im Empfang -- Abstimmwert (Senden: 99,98 kBd)
     MDMCFG2,  0x06,   // 2-FSK, Dekodierung in Software, Sync 16/16 + Carrier Sense
-    MDMCFG1,  0x22,   // 4 Byte Praeambel: mit dem Sync-Wort 38 Chips (01), n >= 19
+    MDMCFG1,  0x22,   // Senden: 4 Byte Praeambel = 32 Chips 1010..., dann das
+                      //   Sync-Wort; davor stehen nur 3 Paare (01) in Normphase
     MDMCFG0,  0xF8,   // Kanalabstand (Reset-Wert, CHANNR = 0)
     CHANNR,   0x00,
     DEVIATN,  0x44,   // erwarteter Hub 38,1 kHz -- Abstimmwert (Senden: 50,8 kHz)

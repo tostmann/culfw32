@@ -86,6 +86,14 @@ public:
     void on_rx_error(ProtocolId p);
     void on_tx_error(ProtocolId p);
     void on_crc_error(ProtocolId p);
+    // Zaehler, die NICHT in rx_err eingehen (bisher nur wM-Bus):
+    //   rx_overflow:  der RX-FIFO ist uebergelaufen, weil der Empfangstask zu
+    //                 spaet kam. Ein dabei unvollstaendiger Rahmen meldet die
+    //                 Klasse zusaetzlich per on_rx_error.
+    //   sync_rejects: Sync-Wort erkannt, aber der Anfang war kein Rahmen
+    //                 (meist Rauschen).
+    void on_rx_overflow(ProtocolId p);
+    void on_sync_reject(ProtocolId p);
 
     // Globaler TX-Airtime-Counter (Summe ueber alle Protokolle).
     uint32_t tx_airtime_10ms_total() const {
@@ -102,6 +110,8 @@ public:
         uint32_t rx_err;
         uint32_t tx_err;
         uint32_t crc_err;
+        uint32_t rx_overflow;
+        uint32_t sync_rejects;
         int32_t  last_rssi_dbm;
         uint32_t last_rx_uptime_ms; // 0 = noch nichts empfangen
     };
@@ -142,6 +152,8 @@ private:
         std::atomic<uint32_t> rx_err          {0};
         std::atomic<uint32_t> tx_err          {0};
         std::atomic<uint32_t> crc_err         {0};
+        std::atomic<uint32_t> rx_overflow     {0};
+        std::atomic<uint32_t> sync_rejects    {0};
         std::atomic<int32_t>  last_rssi_dbm   {0};
         std::atomic<uint32_t> last_rx_us      {0};   // esp_timer_get_time() snapshot ms
     };
