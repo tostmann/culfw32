@@ -1471,6 +1471,7 @@ void handle_eth(char sub, Transport* src, uint8_t slot_id, EthManager* eth) {
 
 // E-Befehl (Ethernet/Network) — culfw `E`-Familie + CULFW32-WiFi-Erweiterung
 // `EW*`. a-culfw (CUNO) kennt Ei/Ec/Ed/En, siehe handle_eth(). CULFW32 ergaenzt:
+//   (s/p/m/h: fuehrende Leerzeichen/Tabs vor dem Wert werden uebersprungen)
 //   EWs<ssid>     set SSID (Rest ist die SSID, bis CR; max 32 byte)
 //   EWp<psk>      set PSK (max 63 byte; auch leer = open network)
 //   EWm<n>        set Mode (0=off, 1=STA), n als ASCII-Dezimal
@@ -1613,13 +1614,21 @@ void handle_E(std::span<const char> args, Transport* src, uint8_t slot_id,
         return std::string(s.data(), n);
     };
 
-    if (sub == 's') { wifi->set_ssid    (str_from(val)); return; }
-    if (sub == 'p') { wifi->set_psk     (str_from(val)); return; }
-    if (sub == 'h') { wifi->set_hostname(str_from(val)); return; }
+    // Leerzeichen/Tabs zwischen Buchstabe und Wert ueberspringen, wie bei
+    // EWA/EWP: `EWs MyWiFi` und `EWm 1` (so in docs/NetworkHowTo.md) setzten
+    // bis 0.2.21 die SSID " MyWiFi" bzw. Modus 0. Eine SSID oder ein PSK, die
+    // tatsaechlich mit einem Leerzeichen beginnen, setzt EWs/EWp damit nicht mehr.
+    auto arg = val;
+    while (!arg.empty() && (arg.front() == ' ' || arg.front() == '\t'))
+        arg = arg.subspan(1);
+
+    if (sub == 's') { wifi->set_ssid    (str_from(arg)); return; }
+    if (sub == 'p') { wifi->set_psk     (str_from(arg)); return; }
+    if (sub == 'h') { wifi->set_hostname(str_from(arg)); return; }
     if (sub == 'm') {
         // ASCII-decimal mode 0..3
         uint8_t mode = 0;
-        for (char c : val) {
+        for (char c : arg) {
             if (c >= '0' && c <= '9') mode = mode * 10 + (c - '0');
             else break;
         }

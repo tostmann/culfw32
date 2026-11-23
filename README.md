@@ -103,7 +103,7 @@ In `idf.py menuconfig` → "CULFW32 Configuration", individual radio classes (As
 2. **WiFi provisioning** — three ways:
    - **Improv-Serial**: open `install.busware.de` in the browser (Web Serial API), select CULFW32, enter SSID/PSK.
    - **AP fallback**: `?wifi.mode=2` puts CULFW32 into AP mode (SSID = host name, `culfw32-xxxxxx`), then set the credentials via the web UI.
-   - **ASCII**: via USB-CDC `EWs<SSID>` and `EWp<password>`.
+   - **ASCII**: via USB-CDC `EWs<SSID>`, `EWp<password>` and `EWm1`, then restart once with `B00` (see `docs/NetworkHowTo.md`).
 3. Open the **web UI**: `http://<culfw32-ip>` shows the tabs Config, Stats, Send, wM-Bus and Terminal.
 4. Optional: connect FHEM/debmatic — see `docs/HmuartlgwHowTo.md` and `docs/DebmaticHowTo.md`; for meters (wM-Bus) see `docs/WmbusHowTo.md`.
 

@@ -35,8 +35,11 @@ WebSocket endpoints:
 EWs MyWiFi                # set the SSID
 EWp MyPassword            # set the password
 EWm 1                     # mode 1 (STA, normal client)
+B00                       # restart once, see below
 E                         # check the status — waiting for "state=connected ip=…"
 ```
+
+The space after `EWs`, `EWp`, `EWm` and `EWh` is optional (`EWsMyWiFi` works the same). If the stick started with WiFi off (mode 0, the default), WiFi and the network services come up only after a restart, so run `B00` once after `EWm 1`; the USB console stays open during the restart.
 
 As soon as the status shows `connected`, the TCP server is reachable on port `2323`:
 
@@ -66,7 +69,7 @@ Fields:
 - `ip`: current IPv4 address (only in the `connected` state)
 - `rssi`: signal strength in dBm (only in the `connected` state)
 
-### `EW` — full status (5 lines)
+### `EW` — full status
 
 ```
 > EW
@@ -85,7 +88,7 @@ The password is **never** shown in plain text — not even via `R` reads, becaus
 > EWs MyHomeWifi
 ```
 
-At most 32 bytes (esp_wifi limit). Persistent. Triggers an immediate reconnect attempt if `mode != 0`.
+At most 32 bytes (esp_wifi limit). Persistent. Triggers an immediate reconnect attempt if `mode != 0`; if the stick started in mode 0, WiFi comes up only after a restart (`B00`). Spaces and tabs before the name are skipped, so `EWs` cannot set an SSID that really begins with a space.
 
 ### `EWp<password>` — set the password
 
@@ -93,13 +96,13 @@ At most 32 bytes (esp_wifi limit). Persistent. Triggers an immediate reconnect a
 > EWp <your-wifi-password>
 ```
 
-At most 63 bytes. Persistent. Empty password = OPEN network. The output never echoes the password (only the `EW` acknowledgement with `***`).
+At most 63 bytes. Persistent. Empty password = OPEN network. Spaces and tabs before the password are skipped, as for `EWs`. The command prints nothing; `EW` shows the password as `***`.
 
 ### `EWm<N>` — mode
 
 ```
-> EWm 0       # WiFi completely off
-> EWm 1       # STA / client mode (default)
+> EWm 0       # WiFi completely off (default)
+> EWm 1       # STA / client mode
 > EWm 2       # AP fallback: try STA first; open the AP after 30 s without a connection
 > EWm 3       # STA+AP at the same time (both active immediately)
 ```
@@ -323,7 +326,7 @@ No radio traffic. CULFW32 remains reachable via USB (and UART0 if switched on). 
 | `nc <ip> 2323` does not connect | WiFi `disconnected`, or firewall, or **the allowlist blocks your IP** | check `E`; with `EW allow=<x>`, check whether your IP matches; if necessary `EWA any` |
 | `Connection reset by peer` immediately on connect | Allowlist does not match | `EW` shows the current filter; `EWA <your-ip>/32` or `EWA any` |
 | `avahi-browse _culfw._tcp` shows nothing | mDNS multicast is filtered by the router/switch | use the IP directly instead of the mDNS host name; check the router setting "IGMP Snooping" |
-| No reconnect after `EWs <newSSID>` | mode was 0 | set `EWm 1` |
+| No reconnect after `EWs <newSSID>` | mode was 0 | set `EWm 1`, then restart with `B00` |
 | Connection drops after reboot | LwIP TIME_WAIT pool full during rapid reconnect tests | irrelevant under real load (one permanent connection); if needed, raise `CONFIG_LWIP_MAX_ACTIVE_TCP` |
 
 ### Known limits
@@ -348,6 +351,9 @@ EWS done 2
 > EWs MyWiFi
 > EWp mysecretpassword
 > EWm 1
+> B00
+B reset
+(boot messages)
 
 > E
 E connecting mode=1 ssid=MyWiFi ip=0.0.0.0 rssi=0
