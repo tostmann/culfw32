@@ -6,12 +6,12 @@
 
 namespace culfw32 {
 
-HbrfethVirtualTransport::HbrfethVirtualTransport(HbrfethListener* listener, uint32_t ip, uint16_t port)
-    : listener_(listener), ip_(ip), port_(port) {}
+HbrfethVirtualTransport::HbrfethVirtualTransport(HbrfethListener* listener)
+    : listener_(listener) {}
 
 esp_err_t HbrfethVirtualTransport::write(std::span<const uint8_t> data) {
     if (!listener_) return ESP_ERR_INVALID_STATE;
-    listener_->send_frame(ip_, port_, data.data(), data.size());
+    listener_->send_frame(this, data.data(), data.size());
     return ESP_OK;
 }
 

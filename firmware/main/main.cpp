@@ -1877,8 +1877,8 @@ extern "C" void app_main(void) {
 
 #if defined(CONFIG_CULFW32_BUILD_TRANSPORT_HBRFETH_UDP)
         // HB-RF-ETH-UDP-Tunnel ist debmatic-spezifisch (multimacd verbindet sich
-        // ueber den Tunnel). Slots werden mit Dual gestempelt sobald der erste
-        // Frame ankommt — dafuer setzt set_frontend einen Default-Mode-Hint.
+        // ueber den Tunnel). Jede Session bekommt beim CONNECT einen eigenen
+        // Frontend-Slot mit ModuleMode::Dual (attach_dynamic_transport).
         g_hbrfeth = std::make_unique<HbrfethListener>();
         g_hbrfeth->set_frontend(g_fe_hmu.get());
         // mDNS-TXT tag/emulates spiegeln den aktuellen hmu.module-Modus

@@ -224,17 +224,19 @@ Up to build 0.1.152 there was a UAF/ABA bug in the hello timer: with very fast c
 
 If build < 0.1.153: upgrade.
 
-### `bad ep-id N expected M` in the UDP listener log
+### `bad ep-id N expected M` in the UDP listener log, CULFW32 restarts over and over
 
-hb-rf-eth reconnect with an **old endpoint ID** from the Pi tunnel. CULFW32 assigns an ep-id on the first connect (e.g. 1); if the Pi later comes back with ep-id 3 after a disconnect, CULFW32 rejects the packets. This is expected behavior — the Pi has to reconnect:
+When the hb-rf-eth kernel module receives no packet for 5 s (Wi-Fi dropout, restart or OTA update of CULFW32), it reconnects from a new UDP port with the endpoint ID it was given before, and it does not send StartConn again. Up to build 0.2.22 CULFW32 rejected these reconnects (`reconnect with bad ep-id`), the module retried about every 0.6 s, and after four attempts CULFW32 crashed with a store access fault and restarted, again and again while the Pi kept trying.
+
+**Fixed in 0.2.23:** CULFW32 keeps the session of a host across such gaps, including the StartConn state, and takes over the endpoint ID after its own restart. Frames flow again without restarting debmatic.
+
+If build < 0.2.23: upgrade. To get an older build out of the loop, reconnect the tunnel on the Pi:
 
 ```bash
 echo "" | sudo tee /sys/class/hb-rf-eth/hb-rf-eth/connect    # disconnect
 sleep 1
 echo 192.168.1.42 | sudo tee /sys/class/hb-rf-eth/hb-rf-eth/connect
 ```
-
-Known edge case: with very stale UDP packets from an old Pi reboot, CULFW32 can panic in rare cases — out-of-scope follow-up item, to be addressed in v1.x.
 
 ### Device transmits, but the `multimacd` log shows nothing
 
