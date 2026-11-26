@@ -40,11 +40,27 @@
 // Sperrreihenfolge: das Frontend schreibt unter seinem eigenen Mutex ueber
 // send_frame() (frontend.mtx -> hbrfeth.mtx_). Deshalb ruft der Listener das
 // Frontend (attach/detach, deliver_rx) nie unter mtx_ auf.
+//
+// Task und Socket: Ein eigener Task ("hbrfeth") liest einen BSD-UDP-Socket,
+// haelt die Keepalives samt Timeout und stellt Type-7-Frames dem Frontend zu;
+// der HMUARTLGW-Dispatch (Funksendung, claim_radio_ bis 3 s) laeuft damit in
+// diesem Task. Gesendet wird aus diesem Task und aus Frontend-Tasks
+// (send_frame) mit sendto(), immer unter mtx_: ESP-IDF erlaubt Lesen, Schreiben
+// und Schliessen aus verschiedenen Threads auf einem Socket, mehrere
+// gleichzeitige Schreiber aber nur mit eigener Sperre (ESP-IDF API Guide
+// "lwIP"). Die Empfangs-Mailbox des Sockets fasst 32 Datagramme
+// (CONFIG_LWIP_UDP_RECVMBOX_SIZE, Vorgabe 6); hb_rf_eth.ko stellt hoechstens
+// 31 hintereinander in seine Sendewarteschlange (QUEUE_LENGTH 32). SO_RCVBUF
+// kappt die Bytes wartender Datagramme bei 8 KB (CONFIG_LWIP_SO_RCVBUF).
+// Bis 0.2.23 lief der Listener ueber die lwIP-Raw-API: Empfang und
+// Dispatch im tcpip-Thread (3 KB Stack, der IP-Stack stand solange still),
+// udp_sendto() aus esp_timer- und Frontend-Tasks — laut derselben Quelle ist
+// die Raw-API in ESP-IDF nicht unterstuetzt.
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "lwip/udp.h"
-#include "lwip/ip_addr.h"
+#include "freertos/task.h"
+#include <cstddef>
 #include <cstdint>
 #include <atomic>
 #include <array>
@@ -80,13 +96,14 @@ public:
     void send_frame(const HbrfethVirtualTransport* from, const uint8_t* data, size_t len);
 
 private:
-    static void udp_recv_trampoline_(void* arg, struct udp_pcb* pcb,
-                                     struct pbuf* p, const ip_addr_t* addr, uint16_t port);
-    void on_udp_packet_(const uint8_t* data, size_t len, const ip_addr_t* addr, uint16_t port);
+    static void task_trampoline_(void* arg);
+    void task_loop_(int fd);
+    // Ein Datagramm vom Socket lesen und verarbeiten; false, wenn keins da war.
+    bool receive_one_(int fd, uint32_t wait_us);
+    // ip in network byte order, port in host byte order.
+    void on_udp_packet_(const uint8_t* data, size_t len, uint32_t ip, uint16_t port);
     void on_connect_(uint32_t ip, uint16_t port, uint8_t cnt,
                      const uint8_t* payload, size_t payload_len);
-
-    static void keepalive_trampoline_(void* arg);
     void keepalive_tick_();
 
     struct ClientState {
@@ -114,11 +131,20 @@ private:
     // 0 heisst im V2-CONNECT "neue Session" und wird nie vergeben.
     static uint8_t next_endpoint_id_(uint8_t ep);
 
+    // hb_rf_eth.ko sendet Datagramme bis BUFFER_SIZE = 1500 Byte.
+    static constexpr size_t kMaxDatagram = 1500;
+
     HmuartlgwFrontend* frontend_ = nullptr;
-    struct udp_pcb*    pcb_ = nullptr;
-    void*              keepalive_timer_ = nullptr;
+    int                sock_ = -1;          // unter mtx_ lesen/schreiben
+    TaskHandle_t       task_ = nullptr;
+    std::atomic<bool>  run_{false};
+    SemaphoreHandle_t  exited_ = nullptr;   // gibt der Task beim Ende
     SemaphoreHandle_t  mtx_ = nullptr;
     std::array<ClientState, kMaxClients> clients_{};
+    // Puffer als Member, nicht auf dem Stack: send_frame() laeuft auch im
+    // RX-Task der Funkklasse. rx_buf_ gehoert dem Task, tx_buf_ steht unter mtx_.
+    uint8_t rx_buf_[kMaxDatagram];
+    uint8_t tx_buf_[kMaxDatagram];
     bool started_ = false;
     bool mdns_added_ = false;
     bool module_dual_ = false;   // mDNS-TXT Identitaet, Default Legacy/Co_CPU_App

@@ -324,10 +324,23 @@ size_t SystemMonitor::format_task_stats(char* out, size_t out_size) const {
     if (!arr) { out[0] = '\0'; return 0; }
 
     UBaseType_t got = uxTaskGetSystemState(arr, n, nullptr);
+    // Nur ganze Zeilen, und nie mehr zurueckmelden, als in out steht: bis
+    // 0.2.23 lieferte die Funktion bei Ueberlauf die volle Laenge (snprintf);
+    // ab etwa 46 Tasks haette ?stats ueber seinen 2048-B-Puffer hinaus
+    // gelesen (heute ~28 Tasks, ~1250 B).
     size_t pos = 0;
-    pos += std::snprintf(out + pos, (pos < out_size ? out_size - pos : 0),
-                         "task                stack-min(B) prio state\r\n");
-    for (UBaseType_t i = 0; i < got && pos < out_size; ++i) {
+    out[0] = '\0';
+    auto append = [&](const char* line, int len) {
+        if (len <= 0) return false;
+        const size_t l = static_cast<size_t>(len);
+        if (pos + l >= out_size) return false;
+        std::memcpy(out + pos, line, l + 1);
+        pos += l;
+        return true;
+    };
+    static constexpr char kHeader[] = "task                stack-min(B) prio state\r\n";
+    append(kHeader, static_cast<int>(sizeof(kHeader) - 1));
+    for (UBaseType_t i = 0; i < got; ++i) {
         const char* st = "?";
         switch (arr[i].eCurrentState) {
             case eRunning:   st = "RUN";  break;
@@ -340,11 +353,13 @@ size_t SystemMonitor::format_task_stats(char* out, size_t out_size) const {
         // High-Watermark ist in StackType_t-Worten — fuer ESP32(C6) = 4 Byte.
         uint32_t stack_min_b =
             static_cast<uint32_t>(arr[i].usStackHighWaterMark) * sizeof(StackType_t);
-        pos += std::snprintf(out + pos, (pos < out_size ? out_size - pos : 0),
-                             "%-19s %12u %4u %s\r\n",
-                             arr[i].pcTaskName,
-                             static_cast<unsigned>(stack_min_b),
-                             static_cast<unsigned>(arr[i].uxCurrentPriority), st);
+        char line[64];
+        const int len = std::snprintf(line, sizeof(line), "%-19s %12u %4u %s\r\n",
+                                      arr[i].pcTaskName,
+                                      static_cast<unsigned>(stack_min_b),
+                                      static_cast<unsigned>(arr[i].uxCurrentPriority), st);
+        if (len >= static_cast<int>(sizeof(line))) continue;
+        if (!append(line, len)) break;
     }
     heap_caps_free(arr);
     return pos;

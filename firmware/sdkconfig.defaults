@@ -44,6 +44,26 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 # 24 gives 5+13+6 headroom for several parallel browser sessions + smoke tests.
 CONFIG_LWIP_MAX_SOCKETS=24
 
+# Receive mailbox of a UDP socket. The HB-RF-ETH listener (UDP 3008, its own
+# task) is the only UDP socket that receives from the network. hb_rf_eth.ko
+# queues up to 31 datagrams (QUEUE_LENGTH 32 in piVCCU kernel/hb_rf_eth.c) and
+# sends them back to back; with the default of 6, a burst of more than six lost
+# the rest while the listener task was busy (measured 2026-11-26: 6 of 8, 6 of
+# 12, 6 of 20). The loopback control sockets of esp_http_server get the same
+# mailbox and size their work semaphore from this option.
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=32
+
+# SO_RCVBUF, so that the HB-RF-ETH listener can cap the payload of datagrams
+# waiting in its mailbox at 8 KB: each one keeps its receive buffer (Wi-Fi or
+# Ethernet) until the listener task fetches it. A burst of small HMU frames
+# still fits; a burst of large packets is cut off at 8 KB (measured 2026-11-26
+# with 1200-byte datagrams). The cap counts payload bytes only: the number of
+# waiting datagrams, and with it the number of Wi-Fi receive buffers they hold
+# (CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM = 32), stays bounded by the mailbox
+# alone. Every other socket keeps lwIP's default size, which is unlimited
+# (RECV_BUFSIZE_DEFAULT = INT_MAX).
+CONFIG_LWIP_SO_RCVBUF=y
+
 # Online update (components/ota_update): an image loaded via OTA starts as
 # PENDING_VERIFY and is only confirmed after it has run stably; otherwise the
 # bootloader boots the previous one. This lives in the BOOTLOADER — which only

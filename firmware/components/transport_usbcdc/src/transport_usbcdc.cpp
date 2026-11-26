@@ -20,7 +20,7 @@ constexpr const char* TAG = "tx-usbcdc";
 // Stick so bei Seite 66 von 105 das Dm. 4 KB fassen mehrere Seiten, auch
 // wenn die RX-Task einmal ein paar Millisekunden nicht drankommt.
 constexpr int RX_BUF_SIZE  = 4096;
-constexpr int TX_BUF_SIZE  = 1024;     // USB-Serial-JTAG-Driver hardware-side TX FIFO
+constexpr int TX_BUF_SIZE  = 1024;     // TX-Ringpuffer des Treibers = groesster einzelner Schreibaufruf
 
 // App-Level TX-Queue (Producer-Consumer mit drop-oldest-on-overflow):
 //   - write() (Frontend-Task-Kontext) enqueued NON-BLOCKING in tx_buf_.
@@ -32,6 +32,9 @@ constexpr int TX_BUF_SIZE  = 1024;     // USB-Serial-JTAG-Driver hardware-side T
 // hat schon `buf[2048]` als Producer-Buffer, jetzt symmetrisch. 1024 war zu
 // klein nachdem `cdc:`-Counter-Zeile dazukam (Build 0.1.729): 1267-B-Reply
 // wurde silent gedroppt (siehe notes/phase5_decoder_freeze_2026-05-11.md).
+// Die engere Grenze war aber der Treiber-Ringpuffer (TX_BUF_SIZE): Nachrichten
+// ueber 1024 B gingen bis 0.2.23 trotzdem verloren, erst seit tx_task in
+// Stuecken schreibt, kommen sie bis TX_SCRATCH an.
 constexpr size_t TX_QUEUE_BYTES        = 8192;
 // 4 KB Stack — scratch[2048] auf dem Stack frisst die Haelfte, dazu kommt
 // usb_serial_jtag_write_bytes-Driver-Frames + FreeRTOS. 3 KB war mit
@@ -165,8 +168,19 @@ void UsbCdcTransport::tx_task(void* arg) {
         // Hosts wuerde write_bytes hier returnen (loss), tx_dropped_full
         // bleibt 0 weil enqueue erfolgreich war — Loss erscheint dann als
         // tx_enqueued > tx_sent + tx_dropped_host_gone Diff.
-        usb_serial_jtag_write_bytes(scratch, n, pdMS_TO_TICKS(500));
-        self->tx_sent_.fetch_add(1, std::memory_order_relaxed);
+        // In Stuecken bis TX_BUF_SIZE: der Treiber legt jeden Aufruf als
+        // Ganzes in seinen Byte-Ringpuffer (xRingbufferSend), ein groesserer
+        // passt nie hinein und kommt mit 0 zurueck (IDF ringbuf.c, "Data will
+        // never ever fit"). Bis 0.2.23 ging so jede Antwort von 1025 bis 2048
+        // Byte verloren, etwa die ?stats-Tabelle (~1250 B mit WLAN).
+        size_t off = 0;
+        while (off < n) {
+            const size_t piece = (n - off < static_cast<size_t>(TX_BUF_SIZE))
+                                     ? n - off : static_cast<size_t>(TX_BUF_SIZE);
+            if (usb_serial_jtag_write_bytes(scratch + off, piece, pdMS_TO_TICKS(500)) <= 0) break;
+            off += piece;
+        }
+        if (off == n) self->tx_sent_.fetch_add(1, std::memory_order_relaxed);
     }
     vTaskDelete(nullptr);
 }

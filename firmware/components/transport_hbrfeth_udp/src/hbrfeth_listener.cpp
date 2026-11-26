@@ -8,9 +8,10 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_app_desc.h"
-#include "lwip/udp.h"
-#include "lwip/pbuf.h"
+#include "sdkconfig.h"
+#include "lwip/sockets.h"
 #include "mdns.h"
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 
@@ -30,6 +31,25 @@ constexpr uint8_t T_FRAME       = 7;
 
 constexpr int64_t kKeepAliveTimeoutUs = 5'000'000;  // 5 s laut HB-RF-ETH-source
 constexpr int64_t kKeepAliveOutPeriodUs = 1'000'000;  // 1 s
+
+// Stack und Prioritaet wie die TcpRxPool-Worker, in denen dasselbe Frontend
+// fuer TCP 2325/2327 laeuft (main.cpp: TcpRxPool init(8, 6144), Prio 6).
+constexpr uint32_t    kTaskStack = 6144;
+constexpr UBaseType_t kTaskPrio  = 6;
+// Vor der Timeout-Pruefung alles abholen, was schon wartet: hoechstens so
+// viele Datagramme, wie die Empfangs-Mailbox des Sockets fasst
+// (sdkconfig.defaults: 32; hb_rf_eth.ko stellt hoechstens 31 hintereinander).
+constexpr int kDrainMax = CONFIG_LWIP_UDP_RECVMBOX_SIZE;
+// Hoechstens so viele Bytes Nutzlast wartender Datagramme (SO_RCVBUF): jedes
+// haelt bis zum Abholen seinen Empfangspuffer (WLAN bzw. Ethernet). Bursts
+// kleiner HMU-Rahmen passen ganz hinein, eine Flut grosser Pakete auf UDP 3008
+// wird bei 8 KB gekappt, statt bis 32 x 1,5 KB zu binden, solange der Task in
+// einem langen Dispatch steht (Review 0227 M1). Nicht begrenzt ist die Zahl:
+// 32 kleine Datagramme koennen weiter alle 32 dynamischen WLAN-RX-Puffer
+// halten (CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM), bis der Task sie abholt
+// (Review 0228 N1, offen; mit der Raw-API galt dasselbe fuer die
+// tcpip-Mailbox). Verworfen wird still, ohne Zaehler.
+constexpr int kRcvBufBytes = 8192;
 }  // anon
 
 // lwIP haelt IPv4 in network byte order; auf dem C6 (little endian) ist das
@@ -41,30 +61,44 @@ constexpr int64_t kKeepAliveOutPeriodUs = 1'000'000;  // 1 s
 esp_err_t HbrfethListener::start(uint16_t port) {
     if (started_) return ESP_OK;
     if (!mtx_) mtx_ = xSemaphoreCreateMutex();
+    if (!exited_) exited_ = xSemaphoreCreateBinary();
+    if (!mtx_ || !exited_) return ESP_ERR_NO_MEM;
 
-    pcb_ = udp_new();
-    if (!pcb_) {
-        ESP_LOGE(TAG, "udp_new failed");
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0) {
+        ESP_LOGE(TAG, "socket failed (errno %d)", errno);
         return ESP_FAIL;
     }
-    err_t err = udp_bind(pcb_, IP_ADDR_ANY, port);
-    if (err != ERR_OK) {
-        ESP_LOGE(TAG, "udp_bind to :%u failed (lwip err %d)", port, err);
-        udp_remove(pcb_);
-        pcb_ = nullptr;
+    sockaddr_in local = {};
+    local.sin_family      = AF_INET;
+    local.sin_port        = htons(port);
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) {
+        ESP_LOGE(TAG, "bind to :%u failed (errno %d)", port, errno);
+        ::close(fd);
         return ESP_FAIL;
     }
-    udp_recv(pcb_, &HbrfethListener::udp_recv_trampoline_, this);
-
-    // KeepAlive-Tick (1 Hz) startet auch fuer Timeout-check
-    esp_timer_create_args_t a = {};
-    a.callback = &HbrfethListener::keepalive_trampoline_;
-    a.arg      = this;
-    a.name     = "hbrfeth-ka";
-    esp_timer_handle_t h = nullptr;
-    if (esp_timer_create(&a, &h) == ESP_OK) {
-        keepalive_timer_ = h;
-        esp_timer_start_periodic(h, kKeepAliveOutPeriodUs);
+    int rcvbuf = kRcvBufBytes;
+    if (::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) != 0) {
+        ESP_LOGW(TAG, "SO_RCVBUF %d failed (errno %d)", rcvbuf, errno);
+    }
+    xSemaphoreTake(mtx_, portMAX_DELAY);
+    sock_ = fd;
+    xSemaphoreGive(mtx_);
+    // Ein Signal eines frueheren Tasks, auf den stop() nicht mehr gewartet
+    // hat, darf das naechste stop() nicht vorzeitig enden lassen.
+    xSemaphoreTake(exited_, 0);
+    run_ = true;
+    if (xTaskCreate(&HbrfethListener::task_trampoline_, "hbrfeth", kTaskStack, this,
+                    kTaskPrio, &task_) != pdPASS) {
+        ESP_LOGE(TAG, "task create failed");
+        run_ = false;
+        task_ = nullptr;
+        xSemaphoreTake(mtx_, portMAX_DELAY);
+        sock_ = -1;
+        xSemaphoreGive(mtx_);
+        ::close(fd);
+        return ESP_ERR_NO_MEM;
     }
 
     // mDNS announce — hb_rf_eth-Kernel-Modul kann uns dadurch automatisch
@@ -124,16 +158,20 @@ void HbrfethListener::set_module_identity(bool dual) {
 esp_err_t HbrfethListener::stop() {
     if (!started_) return ESP_OK;
     started_ = false;
-    if (keepalive_timer_) {
-        esp_timer_stop(static_cast<esp_timer_handle_t>(keepalive_timer_));
-        esp_timer_delete(static_cast<esp_timer_handle_t>(keepalive_timer_));
-        keepalive_timer_ = nullptr;
+    // Der Task prueft run_ spaetestens nach einer Keepalive-Periode (oder nach
+    // einem laufenden Dispatch) und endet dann; erst danach den Socket
+    // schliessen, damit select/recvfrom nicht auf einem fremden Deskriptor
+    // landen, falls die Nummer neu vergeben wird.
+    run_ = false;
+    if (task_ && xSemaphoreTake(exited_, pdMS_TO_TICKS(10000)) != pdTRUE) {
+        ESP_LOGW(TAG, "listener task did not stop within 10 s");
     }
-    if (pcb_) {
-        udp_recv(pcb_, nullptr, nullptr);
-        udp_remove(pcb_);
-        pcb_ = nullptr;
-    }
+    task_ = nullptr;
+    xSemaphoreTake(mtx_, portMAX_DELAY);
+    const int fd = sock_;
+    sock_ = -1;
+    xSemaphoreGive(mtx_);
+    if (fd >= 0) ::close(fd);
     if (mdns_added_) {
         mdns_service_remove("_raw-uart", "_udp");
         mdns_added_ = false;
@@ -141,26 +179,77 @@ esp_err_t HbrfethListener::stop() {
     return ESP_OK;
 }
 
-void HbrfethListener::udp_recv_trampoline_(void* arg, struct udp_pcb* /*pcb*/,
-                                            struct pbuf* p, const ip_addr_t* addr, uint16_t port) {
+void HbrfethListener::task_trampoline_(void* arg) {
     auto* self = static_cast<HbrfethListener*>(arg);
-    if (!p) return;
-    if (p->len < 4) { pbuf_free(p); return; }
-    self->on_udp_packet_(static_cast<const uint8_t*>(p->payload), p->len, addr, port);
-    pbuf_free(p);
+    xSemaphoreTake(self->mtx_, portMAX_DELAY);
+    const int fd = self->sock_;
+    xSemaphoreGive(self->mtx_);
+    self->task_loop_(fd);
+    xSemaphoreGive(self->exited_);
+    vTaskDelete(nullptr);
+}
+
+void HbrfethListener::task_loop_(int fd) {
+    int64_t next_tick = esp_timer_get_time() + kKeepAliveOutPeriodUs;
+    while (run_.load()) {
+        const int64_t now = esp_timer_get_time();
+        if (now >= next_tick) {
+            // Erst abholen, was schon im Socket liegt: nach einem langen
+            // Dispatch (Funksendung, claim_radio_ bis 3 s) warten dort
+            // Datagramme, deren Empfang noch nicht in last_rx_us steht.
+            for (int i = 0; i < kDrainMax && receive_one_(fd, 0); ++i) {}
+            keepalive_tick_();
+            next_tick += kKeepAliveOutPeriodUs;
+            if (next_tick <= now) next_tick = now + kKeepAliveOutPeriodUs;
+            continue;
+        }
+        receive_one_(fd, static_cast<uint32_t>(next_tick - now));
+    }
+}
+
+bool HbrfethListener::receive_one_(int fd, uint32_t wait_us) {
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    timeval tv = {};
+    tv.tv_sec  = static_cast<decltype(tv.tv_sec)>(wait_us / 1000000);
+    tv.tv_usec = static_cast<decltype(tv.tv_usec)>(wait_us % 1000000);
+    const int r = ::select(fd + 1, &rfds, nullptr, nullptr, &tv);
+    if (r == 0) return false;
+    if (r < 0) {
+        if (errno != EINTR) {
+            ESP_LOGW(TAG, "select failed (errno %d)", errno);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        return false;
+    }
+    sockaddr_in from = {};
+    socklen_t from_len = sizeof(from);
+    const ssize_t n = ::recvfrom(fd, rx_buf_, sizeof(rx_buf_), MSG_DONTWAIT,
+                                 reinterpret_cast<sockaddr*>(&from), &from_len);
+    if (n < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            ESP_LOGW(TAG, "recvfrom failed (errno %d)", errno);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        return false;
+    }
+    if (n >= 4 && from.sin_family == AF_INET) {
+        on_udp_packet_(rx_buf_, static_cast<size_t>(n), from.sin_addr.s_addr,
+                       ntohs(from.sin_port));
+    }
+    return true;
 }
 
 void HbrfethListener::on_udp_packet_(const uint8_t* data, size_t len,
-                                     const ip_addr_t* addr, uint16_t port) {
+                                     uint32_t ip, uint16_t port) {
     // CRC16 ueber alle bytes ausser den letzten 2 (CRC selbst).
     if (len < 4) return;
     uint16_t crc_calc = hmu_crc16({data, len - 2});
     uint16_t crc_recv = (static_cast<uint16_t>(data[len - 2]) << 8) | data[len - 1];
     if (crc_calc != crc_recv) {
-        ESP_LOGW(TAG, "bad CRC from %u.%u.%u.%u:%u (calc %04x recv %04x)",
-                 ip4_addr1(&addr->u_addr.ip4), ip4_addr2(&addr->u_addr.ip4),
-                 ip4_addr3(&addr->u_addr.ip4), ip4_addr4(&addr->u_addr.ip4),
-                 port, crc_calc, crc_recv);
+        ESP_LOGW(TAG, "bad CRC from " IP4_FMT ":%u (calc %04x recv %04x)",
+                 IP4_ARGS(ip), port, crc_calc, crc_recv);
         return;
     }
 
@@ -168,7 +257,6 @@ void HbrfethListener::on_udp_packet_(const uint8_t* data, size_t len,
     const uint8_t  cnt         = data[1];
     const uint8_t* payload     = data + 2;
     const size_t   payload_len = len - 4;
-    const uint32_t ip          = addr->u_addr.ip4.addr;
 
     if (type == T_CONNECT) {
         on_connect_(ip, port, cnt, payload, payload_len);
@@ -339,12 +427,15 @@ void HbrfethListener::send_frame(const HbrfethVirtualTransport* from,
 
 void HbrfethListener::send_typed_(ClientState& cs, uint8_t type,
                                    const uint8_t* payload, size_t payload_len) {
-    if (!pcb_) return;
+    // mtx_ gehalten: serialisiert alle Schreiber auf sock_ und schuetzt tx_buf_.
+    if (sock_ < 0) return;
     const size_t total = 4 + payload_len;
-    pbuf* pb = pbuf_alloc(PBUF_TRANSPORT, total, PBUF_RAM);
-    if (!pb) return;
-    auto* buf = static_cast<uint8_t*>(pb->payload);
-
+    if (total > sizeof(tx_buf_)) {
+        ESP_LOGW(TAG, "frame too long for one datagram (%u bytes) dropped",
+                 static_cast<unsigned>(total));
+        return;
+    }
+    uint8_t* buf = tx_buf_;
     buf[0] = type;
     buf[1] = cs.tx_counter++;
     if (payload_len) std::memcpy(buf + 2, payload, payload_len);
@@ -352,19 +443,19 @@ void HbrfethListener::send_typed_(ClientState& cs, uint8_t type,
     buf[total - 2] = static_cast<uint8_t>((crc >> 8) & 0xFF);
     buf[total - 1] = static_cast<uint8_t>(crc & 0xFF);
 
-    ip_addr_t addr;
-    addr.type = IPADDR_TYPE_V4;
-    addr.u_addr.ip4.addr = cs.ip;
-    udp_sendto(pcb_, pb, &addr, cs.port);
-    pbuf_free(pb);
+    sockaddr_in to = {};
+    to.sin_family      = AF_INET;
+    to.sin_port        = htons(cs.port);
+    to.sin_addr.s_addr = cs.ip;
+    // UDP wartet nicht auf die Gegenstelle, nur auf den Rundlauf durch den
+    // tcpip-Thread; scheitert sendto, entfaellt das Datagramm (ohne Zaehler).
+    // MSG_DONTWAIT wirkt dabei nicht: lwip_sendto reicht die
+    // Flags nur bei TCP weiter (lwIP sockets.c).
+    ::sendto(sock_, buf, total, MSG_DONTWAIT, reinterpret_cast<sockaddr*>(&to), sizeof(to));
 }
 
-void HbrfethListener::keepalive_trampoline_(void* arg) {
-    static_cast<HbrfethListener*>(arg)->keepalive_tick_();
-}
-
+// Laeuft im Listener-Task (task_loop_), einmal je Keepalive-Periode.
 void HbrfethListener::keepalive_tick_() {
-    if (!started_) return;
     int64_t now = esp_timer_get_time();
     xSemaphoreTake(mtx_, portMAX_DELAY);
     for (auto& cs : clients_) {

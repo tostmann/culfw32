@@ -2761,13 +2761,16 @@ void handle_questionmark(std::span<const char> args, Transport* src,
         // Erste Haelfte (rfstats + sys + cdc + tcp-pool) schon jetzt rausgeben —
         // mit wachsendem Task-Inventar (Pool fuegt 8 Worker hinzu) ueberschritt
         // das Ein-Stueck-`write()` TX_SCRATCH=2048 → USB-CDC drop-full, kompletter
-        // `?stats`-Reply ging verloren. Split per Sektion umgeht das.
+        // `?stats`-Reply ging verloren. Split per Sektion umgeht das. (Teile
+        // ueber 1024 B verlor bis 0.2.23 zusaetzlich der USB-Treiber, siehe
+        // transport_usbcdc tx_task.)
         // Buffer wird wiederverwendet — keine zweite 2-KB-Allocation auf dem
         // Stack der usb-cdc-rx-Task (sonst Stack-Overflow, MCAUSE=0x1b).
         if (n > 0 && src) {
             src->write({reinterpret_cast<const uint8_t*>(buf), n});
         }
-        // Zweiter Chunk: Task-Highwater-Tabelle, wiederverwendeter Buffer.
+        // Zweiter Chunk: Task-Highwater-Tabelle, wiederverwendeter Buffer
+        // (mit WLAN ~1250 B; format_task_stats kuerzt auf ganze Zeilen).
         n = SystemMonitor::instance().format_task_stats(buf, sizeof(buf));
         if (n > 0 && src) {
             src->write({reinterpret_cast<const uint8_t*>(buf), n});
